@@ -1,0 +1,1093 @@
+---
+title: "**ADS-506 - Regional Short-Term Electricity Demand Forecasting**"
+subtitle: "California, Texas, and New York"
+author: "Project Team - 4"
+date: today
+jupyter: python3
+format:
+  pdf:
+    documentclass: article
+    geometry: "top=0.8in, bottom=0.8in, left=0.75in, right=0.75in"
+    fontsize: 11pt
+    fig-width: 7
+    fig-height: 4
+    fig-align: center
+    fig-cap-location: top
+    tbl-cap-location: top
+    number-sections: true
+    toc: true
+    include-in-header:
+      text: |
+        \usepackage{caption}
+        \captionsetup[figure]{
+          font={large,bf},
+          labelfont=bf
+        }
+  html:
+    toc: true
+    number-sections: true
+    fig-align: center
+    fig-cap-location: top
+execute:
+  echo: true
+  warning: false
+  message: false
+  freeze: false
+---
+
+# **Python environment and imports**
+
+```{python}
+#| label: setup
+#| message: false
+#| warning: false
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from pathlib import Path
+from fpppy.utils import plot_series, plot_diagnostics
+from statsforecast import StatsForecast
+from statsmodels.graphics.tsaplots import plot_acf
+```
+
+```{python}
+#| label: display-settings
+#| include: false
+import textwrap
+pd.set_option("display.max_columns", None)
+pd.set_option("display.width", 120)
+```
+
+# **Data Loading and Merging**
+
+The electricity demand data was obtained from the U.S. Energy Information Administration (EIA-930). We selected California, Texas, and New York to analyze multiple time series and compare electricity demand patterns across regions.
+
+## Load datasets
+
+```{python}
+#| label: load-data
+# Define the folder containing the datasets
+data_dir = Path("..") / "data"
+
+# Load California hourly electricity demand data
+cal_data = pd.read_excel(
+    data_dir / "Region_CAL.xlsx",
+    sheet_name="Published Hourly Data")
+
+# Load Texas hourly electricity demand data
+tex_data = pd.read_excel(
+    data_dir / "Region_TEX.xlsx",
+    sheet_name="Published Hourly Data")
+
+# Load New York hourly electricity demand data
+ny_data = pd.read_excel(
+    data_dir / "Region_NY.xlsx",
+    sheet_name="Published Hourly Data")
+
+# Verify the dimensions and column names of each dataset
+datasets = {"California": cal_data,"Texas": tex_data,
+    "New York": ny_data}
+
+# Display dimensions for all three states
+for name, df in datasets.items():
+    print(f"{name}: {df.shape[0]:,} rows, {df.shape[1]} columns")
+```
+
+This step loads the three regional datasets into Python. Each dataset contains 99,336 hourly observations and 66 columns.All three datasets (California, Texas, and New York) have the same column names and structure. These datasets provide historical electricity demand information for comparing regional patterns and developing forecasting models.
+
+## Data Structure Verification
+
+Before combining the datasets, we examine their column names and data types to confirm that they have a consistent structure.We do not need all 66 columns for our forecasting analysis. Therefore, we will select only the required columns, such as Region, UTC time, Local date, Local time, Hour, Time zone, and Demand, from each regional dataset. This will help us reduce unnecessary data, simplify the dataset, and make further data cleaning, merging, and analysis easier.
+
+```{python}
+#| label: data-structure-verification
+# Select only the variables needed for forecasting
+required_columns = ["Region","UTC time","Local date",
+    "Local time","Hour","Time zone","Demand"]
+
+# Display selected column names and data types in a table
+column_summary = pd.DataFrame({
+    "Column_Name": required_columns,
+    "Data_Type": [
+        str(cal_data[col].dtype)
+        for col in required_columns]})
+
+print("\nSelected Columns and Data Types:")
+display(column_summary)
+```
+
+The data types for these columns are consistent across the three datasets.The Region and Time zone columns are stored as object types, while UTC time, Local date, and Local time are stored as datetime types. The Hour column is an integer, and Demand is a float, representing numerical electricity demand values.The date and time columns will help us organize observations chronologically, the Region column will help distinguish California, Texas, and New York, and the Demand column will serve as the main variable for forecasting electricity demand.
+
+## Data Merging
+
+Once the structures have been checked,we combine the three datasets into one DataFrame. We retain the region identifier to distinguish the three time series.
+
+```{python}
+#| label: merge-data
+# Select required columns from California data
+cal_selected = cal_data[required_columns].copy()
+cal_selected["Region"] = "California"
+
+# Select required columns from Texas data
+tex_selected = tex_data[required_columns].copy()
+tex_selected["Region"] = "Texas"
+
+# Select required columns from New York data
+ny_selected = ny_data[required_columns].copy()
+ny_selected["Region"] = "New York"
+
+# Combine the three datasets vertically
+electricity_data = pd.concat([cal_selected, tex_selected, ny_selected],
+    ignore_index=True)
+
+# Display the dimensions of the merged dataset
+print("Combined dataset shape:", electricity_data.shape)
+
+# Check the number of observations for each region
+print("\nObservations by region:")
+print(electricity_data["Region"].value_counts())
+
+# Preview the combined dataset
+display(electricity_data.head())
+```
+
+The California, Texas, and New York datasets were successfully combined into one dataset containing 298,008 observations and 7 selected columns. Each region contributes 99,336 hourly observations. The Region column identifies each time series, allowing us to analyze and compare electricity demand across the three regions.
+
+# **Data Quality Assessment & Data Cleaning**
+
+This step checks the quality of the combined electricity demand dataset before cleaning and aggregation.
+
+## Check for missing and invalid values
+
+```{python}
+#| label: data-quality
+# Check missing values by region
+print("\nMissing values by region:")
+display(electricity_data.groupby("Region").apply(
+        lambda x: x.isna().sum(),
+        include_groups=False))
+
+# Check duplicate hourly records using UTC timestamps
+print("\nDuplicate hourly records:")
+print(electricity_data.duplicated(
+        subset=["Region", "UTC time"]).sum())
+
+# Convert demand to numeric for validation
+electricity_data["Demand"] = pd.to_numeric(
+    electricity_data["Demand"],errors="coerce")
+
+# Check invalid demand values by region
+print("\nDemand quality:")
+display(
+    electricity_data.groupby("Region").agg(
+        Total_Records=("Demand", "size"),
+        Missing_Demand=("Demand", lambda x: x.isna().sum()),
+        Zero_Demand=("Demand", lambda x: (x == 0).sum()),
+        Negative_Demand=("Demand", lambda x: (x < 0).sum())))
+
+# Check the date range for each region
+print("\nDate coverage:")
+display(electricity_data.groupby("Region").agg(
+        Start_Date=("Local date", "min"),
+        End_Date=("Local date", "max")))
+```
+
+The combined dataset contains 298,008 hourly observations across California, Texas, and New York. No duplicate hourly records were found. California and New York each have 24 missing demand values, while Texas has 96, giving a total of 144 missing values (0.048%). New York also contains 15 zero-demand observations, while no negative demand values were found in any region.
+
+All three datasets cover the same period, from July 1, 2015, to October 29, 2026. Overall, the data is mostly complete, but the missing and zero-demand observations need further investigation before cleaning and daily aggregation.
+
+```{python}
+#| label: missing-zero-demand-dates
+# Identify missing and zero demand observations
+problem_records = electricity_data[
+    electricity_data["Demand"].isna() |
+    (electricity_data["Demand"] == 0)].copy()
+
+# Summarize problems by region and date
+problem_summary = (problem_records
+    .groupby(["Region", "Local date"])
+    .agg(Missing_Hours=("Demand", lambda x: x.isna().sum()),
+        Zero_Hours=("Demand", lambda x: (x == 0).sum()))
+    .reset_index())
+
+display(problem_summary)
+```
+
+-   California: All 24 missing values occur on October 29, 2026.
+-   New York: There are 24 missing values on October 29, 2026, and 15 zero-demand observations spread across eight earlier dates.
+-   Texas: Four dates contain 24 missing values each, including October 29, 2026. October 29, 2026: All three regions have 24 missing hourly observations, suggesting that this date is incomplete in the source data.
+
+Next, we will investigate the zero-demand observations and handle dates with missing demand values to improve data quality and forecasting reliability.
+
+## Data Cleaning
+
+```{python}
+#| label: data-cleaning
+# Create a copy for cleaning
+clean_data = electricity_data.copy()
+
+# Convert zero demand values to missing
+clean_data.loc[clean_data["Demand"] == 0, "Demand"] = np.nan
+```
+
+The zero-demand observations in New York were converted to missing values because they may represent reporting errors. The original hourly records were retained so that missing observations can be evaluated during daily aggregation. After this step, California has 24 missing values, New York has 39, and Texas has 96.
+
+Next,before aggregating hourly demand into daily averages, we should check the number of valid hourly observations per region and date. This will help us identify incomplete days while accounting for daylight saving time, when a day may contain 23 or 25 hours.
+
+## Define data Coverage for Forecasting
+
+```{python}
+#| label: analysis-period
+
+# Restrict data to the project analysis period
+clean_data = clean_data[clean_data["Local date"] <= "2026-09-30"].copy()
+
+# Confirm date coverage by region
+date_coverage = (clean_data.groupby("Region")
+    .agg(Start_Date=("Local date", "min"),
+        End_Date=("Local date", "max"),
+        Hourly_Records=("Demand", "size")).reset_index())
+
+display(date_coverage)
+```
+
+The dataset was limited to July 1, 2015, through September 30, 2026. Each region contains 98,640 hourly observations. All three regions have the same date coverage, allowing consistent comparisons and forecasting.
+
+## Verify local date, time, and hour-ending conventions
+
+The EIA data contains UTC time, local date, local time, and hour information. We should check how these fields relate before aggregation.
+
+```{python}
+#| label: verify-hour-conventions
+# Examine local time and DST transition
+time_check = clean_data[
+    (clean_data["Region"] == "California") &
+    (clean_data["Local date"].isin(
+        pd.to_datetime(["2024-11-02", "2024-11-03"])
+    ))
+][
+    ["Region", "UTC time", "Local date",
+     "Local time", "Hour", "Time zone", "Demand"]
+].sort_values("UTC time")
+
+display(time_check.tail(30))
+```
+
+The time records show that the Hour column follows an hour-ending format. During the November 3, 2024, daylight saving time change, 1:00 AM appears twice, resulting in 25 hourly observations. This confirms the importance of using the provided local dates when preparing daily demand data.
+
+## Daily Hourly Completeness and Daylight Saving Time (DST)
+
+Check that the 23-hour and 25-hour dates correspond to the expected DST transitions for each region.
+
+```{python}
+#| label: tbl-incomplete-days
+#| tbl-cap: "Incomplete Hourly Data by Region and Date"
+
+# Count hourly observations per day
+daily_hours = (
+    clean_data.groupby(["Region", "Local date"])
+    .agg(Total_Hours=("Demand", "size"),
+        Valid_Hours=("Demand", "count"))
+    .reset_index())
+
+daily_hours["Missing_Hours"] = (
+    daily_hours["Total_Hours"] - daily_hours["Valid_Hours"])
+
+# Identify incomplete days
+incomplete_days = daily_hours[
+    (daily_hours["Missing_Hours"] > 0) |
+    (~daily_hours["Total_Hours"].isin([23, 24, 25]))]
+
+display(incomplete_days)
+```
+
+```{python}
+#| label: tbl-dst-summary
+#| tbl-cap: "Daylight Saving Time Adjustments by Region"
+
+# Summarize 23-hour and 25-hour days
+dst_summary = (
+    daily_hours[daily_hours["Total_Hours"].isin([23, 25])]
+    .groupby(["Region", "Total_Hours"])
+    .size()
+    .reset_index(name="Number_of_Days"))
+
+display(dst_summary)
+```
+
+Each region has 11 days with 23 hours and 11 days with 25 hours, consistent with daylight saving time changes. The analysis also identified incomplete days in New York and Texas due to missing demand values. Complete daylight saving time days were retained, while incomplete days were flagged for further cleaning.
+
+## Investigating Abnormal Demand Values
+
+```{python}
+#| label: california-anomaly
+# Isolate California's records for the anomaly window (Oct 30 - Nov 5, 2024).
+cal_anomaly = clean_data[
+    (clean_data["Region"] == "California") &
+    (clean_data["Local date"].between(
+        "2024-10-30", "2024-11-05"
+    ))
+].copy()
+
+# Summarize demand for each day in the window
+cal_anomaly_summary = (
+    cal_anomaly.groupby("Local date")
+    .agg(
+        Average_Demand_MW=("Demand", "mean"),
+        Min_Demand_MW=("Demand", "min"),
+        Max_Demand_MW=("Demand", "max"),
+        Valid_Hours=("Demand", "count"))
+    .reset_index())
+
+# Show the daily summary table
+display(cal_anomaly_summary.round(2))
+
+# Plot average daily demand around Nov 2
+plt.figure(figsize=(9, 4))
+plt.plot(
+    cal_anomaly_summary["Local date"],
+    cal_anomaly_summary["Average_Demand_MW"],
+    marker="o"
+)
+plt.axvline(pd.Timestamp("2024-11-02"),
+    color="red",linestyle="--",
+    label="Suspected anomaly")
+plt.title("California Demand Around November 2, 2024",fontsize=16,
+    fontweight="bold",pad=12)
+plt.xlabel("Date")
+plt.ylabel("Average Demand (MW)")
+plt.legend()
+plt.grid(alpha=0.3)
+plt.xticks(rotation=45)
+plt.tight_layout()
+plt.show()
+```
+
+California's average demand dropped sharply to 4,001 MW on November 2, 2024, compared with 27,659 MW the previous day. Demand returned to 25,311 MW the following day. This unusual drop suggests a possible reporting error, so the affected observations were treated as missing.
+
+## Create an hourly anomaly log
+
+```{python}
+#| label: hourly-anomaly-log
+
+# Record missing hourly demand observations
+missing_log = clean_data[
+    clean_data["Demand"].isna()
+][["Region", "Local date", "UTC time"]].copy()
+
+missing_log["Issue"] = "Missing or zero demand"
+missing_log["Action"] = "Review before daily aggregation"
+
+# Record the suspected California anomaly
+cal_flag = clean_data[
+    (clean_data["Region"] == "California") &
+    (clean_data["Local date"] == pd.Timestamp("2024-11-02"))
+][["Region", "Local date", "UTC time"]].copy()
+
+cal_flag["Issue"] = "Suspected abnormal demand"
+cal_flag["Action"] = "Pending validation"
+
+# Combine anomaly records
+anomaly_log = pd.concat([missing_log, cal_flag],
+    ignore_index=True)
+
+display(
+    anomaly_log.groupby(["Region", "Local date", "Issue"])
+    .size().reset_index(name="Affected_Hours"))
+```
+
+The anomaly log identified 24 unusual hourly observations in California, 15 zero-demand observations across eight dates in New York, and 72 missing observations across three dates in Texas. These records were documented to track data-quality issues before final cleaning.
+
+## Finalize data cleaning
+
+```{python}
+#| label: finalize-data-cleaning
+
+# Flag the suspected California demand anomaly
+cal_anomaly_mask = (
+    (clean_data["Region"] == "California") &
+    (clean_data["Local date"] == pd.Timestamp("2024-11-02")))
+
+# Mark anomalous demand as missing
+clean_data.loc[cal_anomaly_mask, "Demand"] = np.nan
+
+# Verify missing demand after cleaning
+final_quality_summary = (
+    clean_data.groupby("Region")
+    .agg(
+        Total_Hours=("Demand", "size"),
+        Valid_Hours=("Demand", "count"),
+        Missing_Hours=("Demand", lambda x: x.isna().sum()))
+    .reset_index())
+
+display(final_quality_summary)
+```
+
+After cleaning, California had 24 missing hourly observations, New York had 15, and Texas had 72. The unusual California demand values and New York's zero-demand values were treated as missing. The cleaned dataset was then used to prepare daily average electricity demand for forecasting.
+
+# **Daily Electricity Demand Series**
+
+## Aggregate to daily average MW
+
+This step converts hourly electricity demand into daily average demand (MW) for California, Texas, and New York. It identifies incomplete days, marks their demand values as missing, and organizes the dataset into Nixtla format (unique_id, ds, y) for forecasting.
+
+```{python}
+#| label: daily-demand-aggregation
+
+# Calculate daily average electricity demand for each region
+daily_demand = (clean_data
+    .groupby(["Region", "Local date"])
+    .agg(y=("Demand", "mean"),
+        Total_Hours=("Demand", "size"),
+        Valid_Hours=("Demand", "count"))
+    .reset_index())
+
+# Identify days with missing hourly demand values
+daily_demand["Incomplete_Day"] = (
+    daily_demand["Valid_Hours"] < daily_demand["Total_Hours"])
+
+# Mark incomplete days as missing to avoid inaccurate daily averages
+daily_demand.loc[daily_demand["Incomplete_Day"], "y"] = np.nan
+
+# Assign a short region code to each time series
+region_codes = {"California": "CAL",
+    "Texas": "TEX", "New York": "NY"}
+daily_demand["unique_id"] = daily_demand["Region"].map(region_codes)
+
+# Rename the date column to match Nixtla's required format
+daily_demand = daily_demand.rename(columns={"Local date": "ds"})
+
+# Keep the required columns and arrange observations by region and date
+daily_demand = daily_demand[["unique_id", "ds", "y",
+     "Total_Hours", "Valid_Hours", "Incomplete_Day"]
+].sort_values(["unique_id", "ds"]).reset_index(drop=True)
+
+# Preview the prepared daily electricity demand dataset
+display(daily_demand.head())
+```
+
+The daily dataset contains 4,110 observations for each region, covering July 1, 2015, through September 30, 2026. Incomplete days are retained with missing demand values, while complete 23-hour and 25-hour DST days are included. This preserves the daily time series structure for further analysis and forecasting.
+
+## Verify the daily series
+
+This step checks the number of total, valid, and missing days for each region. It also verifies the start and end dates of the daily electricity demand dataset.
+
+```{python}
+#| label: tbl-daily-series-summary
+#| tbl-cap: "Daily Series Completeness and Date Coverage by Region"
+# Summarize daily data completeness and date coverage by region
+daily_summary = (
+    daily_demand.groupby("unique_id")
+    .agg(Total_Days=("ds", "size"),
+        Valid_Days=("y", "count"),
+        Missing_Days=("y", lambda x: x.isna().sum()),
+        Start_Date=("ds", "min"),
+        End_Date=("ds", "max"))
+    .reset_index())
+
+# Display the daily series summary
+display(daily_summary)
+```
+
+Each region contains 4,110 daily observations from July 1, 2015, through September 30, 2026. California has 1 missing day, New York has 8, and Texas has 3. These missing days are preserved in the dataset to maintain the daily time series structure. The data is now prepared for the training and holdout split.
+
+# **Training and Holdout Design**
+
+## Split the daily series
+
+Before performing exploratory data analysis and forecasting, we split the daily electricity demand dataset into training and holdout periods. This allows us to study historical demand patterns, develop forecasting models, and later evaluate their performance on unseen data.
+
+Training period: July 1, 2015 – September 30, 2025
+
+Holdout period: October 1, 2025 – September 30, 2026
+
+The training data will be used for EDA, model development, and cross-validation. The holdout data will be used only for the final evaluation to assess how well the models predict future electricity demand.
+
+We will preserve missing demand values and avoid using holdout information during preprocessing or model selection. This helps prevent data leakage and provides a more realistic evaluation of forecasting performance.
+
+### Create training and holdout datasets
+
+```{python}
+#| label: train-test-split
+# Define training and holdout dates
+train_end = pd.Timestamp("2025-09-30")
+test_start = pd.Timestamp("2025-10-01")
+test_end = pd.Timestamp("2026-09-30")
+
+# Split the data into training and holdout datasets
+train_data = daily_demand[daily_demand["ds"] <= train_end].copy()
+
+test_data = daily_demand[
+    daily_demand["ds"].between(test_start, test_end)].copy()
+```
+
+```{python}
+#| label: tbl-train-holdout-summary
+#| tbl-cap: "Training and Holdout Summary by Region"
+# Summarize total and missing observations for each region
+split_summary = pd.DataFrame({
+    "Training_Days": train_data.groupby("unique_id").size(),
+    "Holdout_Days": test_data.groupby("unique_id").size(),
+    "Training_Missing": train_data.groupby("unique_id")["y"].apply(
+        lambda x: x.isna().sum()
+    ),
+    "Holdout_Missing": test_data.groupby("unique_id")["y"].apply(
+        lambda x: x.isna().sum()
+    )}).reset_index()
+
+# Display the training and holdout summary
+display(split_summary)
+```
+
+Each region contains 3,745 training days and 365 holdout days. California has 1 missing training day, New York has 7 missing training days and 1 missing holdout day, and Texas has 2 missing training days and 1 missing holdout day.
+
+The training dataset will be used for exploratory analysis, model development, and cross-validation. The holdout dataset will be reserved for final forecasting evaluation to prevent data leakage.
+
+### Plot training and holdout periods
+
+```{python}
+#| label: plot-train-test-split
+# Plot the train/holdout split for each of the three regions,
+# one subplot per region 
+fig, axes = plt.subplots(3, 1, figsize=(11, 9), sharex=True)
+
+for ax, region in zip(axes, ["CAL", "TEX", "NY"]):
+    # Filter training and holdout data down to the current region
+    train_region = train_data[train_data["unique_id"] == region]
+    test_region = test_data[test_data["unique_id"] == region]
+
+    # Draw the training period 
+    ax.plot(train_region["ds"],train_region["y"],
+        label="Training",linewidth=0.8)
+
+    # Draw the holdout period on the same axes
+    ax.plot(test_region["ds"],test_region["y"],
+        label="Holdout",linewidth=0.8)
+
+    ax.axvline(train_end,color="black",
+        linestyle="--",linewidth=1)
+    ax.set_title(f"{region} Electricity Demand")
+    ax.set_ylabel("Demand (MW)")
+    ax.legend()
+    ax.grid(alpha=0.3)
+
+plt.xlabel("Date")
+plt.suptitle("Training and Holdout Split by Region",fontsize=18,
+    fontweight="bold",y=0.99)
+plt.tight_layout()
+plt.show()
+```
+
+The daily electricity demand data was divided into training and holdout periods. The training dataset contains observations from July 1, 2015, through September 30, 2025, while the holdout dataset covers October 1, 2025, through September 30, 2026. Each region contains 3,745 training days and 365 holdout days. Missing demand values were preserved to maintain the daily time series structure and prevent data leakage.
+
+## Handle Missing Values for Modeling
+
+```{python}
+#| label: missing-values-for-modeling
+
+# Prepare training data for forecasting
+train_model = train_data[
+    ["unique_id", "ds", "y"]].copy()
+
+# Sort by region and date
+train_model = train_model.sort_values(
+    ["unique_id", "ds"])
+
+# Fill missing demand using the previous valid day
+train_model["y"] = (
+    train_model.groupby("unique_id")["y"].ffill())
+
+# Verify missing values
+display(train_model.groupby("unique_id")["y"]
+    .apply(lambda x: x.isna().sum()))
+```
+
+Missing demand values in the training dataset were filled using the previous valid day's demand within each region (forward fill). After this step, California, Texas, and New York have no remaining missing values in the model-ready training data. This preserves the daily time series structure and prepares the data for ARIMA, ETS, and other forecasting models.
+
+The original training and holdout datasets remain unchanged. Forward filling uses only past observations, helping avoid data leakage. During cross-validation, missing values will be handled separately within each training window.
+
+# **High-Demand Analysis**
+
+## Calculate the 95th-Percentile Demand Threshold
+
+-   Training data: Identifies high-demand days used to understand historical patterns.
+-   Holdout data: Identifies high-demand days used later to evaluate forecasting accuracy during periods of unusually high electricity demand.
+
+Next, we will calculate the 95th-percentile daily electricity demand for California, Texas, and New York using only the training data.
+
+This threshold will help us identify high-demand days and later evaluate forecasting model performance during periods of unusually high electricity demand.
+
+```{python}
+#| label: high-demand-threshold
+# Calculate the 95th percentile using training data only
+demand_thresholds = (train_data
+    .groupby("unique_id")["y"]
+    .quantile(0.95)
+    .reset_index(name="P95_Demand_MW"))
+
+print("95th-Percentile Demand Thresholds:")
+display(demand_thresholds.round(2))
+```
+
+The 95th-percentile daily electricity demand thresholds were calculated using only the training data. Texas has the highest threshold at 63,585.69 MW, followed by California at 40,428.84 MW and New York at 22,805.92 MW. These thresholds identify high-demand days within each region and will be used to evaluate forecasting performance during periods of high electricity demand.
+
+## Identify high-demand days
+
+```{python}
+#| label: tbl-training-high-demand
+#| tbl-cap: "Training High-Demand Days by Region"
+# Add regional thresholds to training data
+p95 = demand_thresholds.set_index("unique_id")["P95_Demand_MW"]
+
+train_data["P95_Demand_MW"] = (
+    train_data["unique_id"].map(p95))
+
+# Identify high-demand days in training data
+train_data["High_Demand"] = (
+    train_data["y"] >= train_data["P95_Demand_MW"])
+
+# Summarize training high-demand observations
+high_demand_summary = (
+    train_data.groupby("unique_id")
+    .agg(Valid_Days=("y", "count"),
+        High_Demand_Days=("High_Demand", "sum"))
+    .reset_index())
+
+display(high_demand_summary)
+```
+
+The high-demand analysis identified 188 days in California, 187 days in New York, and 188 days in Texas with daily average demand at or above the region-specific 95th-percentile threshold. These observations represent approximately 5% of valid training days in each region. The thresholds were calculated using training data only to avoid data leakage.
+
+## Set up 7-day cross-validation
+
+We will predict Days 1–7. Training CV uses about three years of initial history and an origin every three days. Holdout evaluation also uses a three-day step. No forecasting model is fitted in this preparation report.
+
+```{python}
+#| label: cv-and-holdout-plan
+#| tbl-cap: "7-Day Cross-Validation and Holdout Evaluation Plan"
+# Define the start and end dates of the daily dataset
+start_date = daily_demand["ds"].min()
+end_date = daily_demand["ds"].max()
+
+# Set the initial training period, forecast interval, and horizon
+initial_days = 1095
+step_days = 3
+horizon = 7
+
+# Create forecast origins within the training period
+# Reserve 7 days after each origin for forecast evaluation
+cv_origins = pd.date_range(
+    start_date + pd.Timedelta(days=initial_days - 1),
+    train_end - pd.Timedelta(days=horizon),
+    freq=f"{step_days}D")
+
+# Create holdout forecast origins at 3-day intervals
+# Ensure every origin has a complete 7-day forecast window
+holdout_origins = pd.date_range(train_end,
+    end_date - pd.Timedelta(days=horizon),
+    freq=f"{step_days}D")
+
+# Summarize the cross-validation and holdout evaluation schedules
+plan = pd.DataFrame({
+    "Stage": ["Training CV", "Holdout Evaluation"],
+    "First_Origin": [cv_origins[0], holdout_origins[0]],
+    "Last_Origin": [cv_origins[-1], holdout_origins[-1]],
+    "Origins": [len(cv_origins), len(holdout_origins)],
+    "Forecast_Days": ["1–7", "1–7"]})
+
+# Display the evaluation plan
+display(plan)
+```
+
+The forecasting evaluation uses an initial training period of 1,095 days, with forecast origins spaced three days apart. Each origin produces forecasts for Days 1–7. This design provides 882 training cross-validation origins and 120 holdout evaluation origins across the three regions. All holdout forecast windows contain seven days, allowing consistent comparisons of forecasting accuracy.
+
+# **Exploratory Data Analysis (EDA)**
+
+Univariate analysis examines the distribution of daily average electricity demand for California, Texas, and New York. We will compare summary statistics and visualize the demand distribution across the three regions.
+
+## Univariate Analysis
+
+### **Summary Statistics by Region**
+
+This step calculates the mean, median, standard deviation, minimum, maximum, and quartiles of daily electricity demand for each region using training data.
+
+```{python}
+#| label: demand-summary
+#| tbl-cap: "Summary Statistics of Daily Electricity Demand by Region"
+#| 
+# Summary statistics by region
+demand_summary = (train_data.groupby("unique_id")["y"]
+    .describe().round(2))
+
+# Display the summary statistics
+display(demand_summary)
+```
+
+Texas has the highest average daily electricity demand (46,081.18 MW), followed by California (31,318.82 MW) and New York (17,627.76 MW). Texas also has the highest standard deviation (9,182.48 MW), indicating greater variation in electricity demand. New York has the lowest average demand and variability among the three regions.
+
+### **Electricity Demand Distribution & Skewness**
+
+The histograms show differences in daily electricity demand across the three regions. Texas has the highest average demand, followed by California and New York.
+
+```{python}
+#| label: fig-demand-distribution
+#| fig-cap: "Distribution and Skewness of Daily Electricity Demand by Region"
+
+fig, axes = plt.subplots(1, 3, figsize=(13, 4))
+
+for ax, region in zip(axes, ["CAL", "TEX", "NY"]):
+    demand = train_data.loc[train_data["unique_id"] == region, "y"
+    ].dropna()
+
+    # Calculate summary measures
+    mean = demand.mean()
+    median = demand.median()
+    skewness = demand.skew()
+
+    # Plot demand distribution
+    ax.hist(demand, bins=30, edgecolor="white")
+
+    # Show mean and median
+    ax.axvline(mean, color="red", linestyle="--", label="Mean")
+    ax.axvline(median, color="black", linestyle="-", label="Median")
+    ax.set_title(f"{region} (Skewness = {skewness:.2f})",
+                 fontweight="bold")
+    ax.set_xlabel("Daily Average Demand (MW)")
+    ax.set_ylabel("Number of Days")
+    ax.legend()
+
+plt.tight_layout()
+plt.show()
+```
+
+-   All three regions show a right-skewed demand distribution.
+-   The mean is higher than the median in each region.
+-   California and New York have longer tails toward higher demand values.
+-   Texas has a wider distribution, showing greater variation in electricity demand.
+
+Most days have demand within a typical range, while a smaller number of days experience unusually high demand. These high-demand periods may be important when developing forecasting models.
+
+### **Demand Variability**
+
+The boxplots show that Texas has the greatest variation in daily electricity demand, followed by California and New York.Each box shows the middle 50% of values, and points beyond the whiskers are potential outliers.
+
+```{python}
+#| label: outliers
+#| fig-cap: "Daily Electricity Demand Distribution by Region"
+
+fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+
+for ax, region in zip(axes, ["CAL", "TEX", "NY"]):
+    demand = train_data.loc[
+        train_data["unique_id"] == region, "y"
+    ].dropna()
+
+    ax.boxplot(demand)
+    ax.set_title(region)
+    ax.set_ylabel("Daily Average Demand (MW)")
+    ax.grid(alpha=0.3)
+plt.tight_layout()
+plt.show()
+```
+
+California and New York also show potential outliers beyond the upper whiskers, indicating some unusually high-demand days.
+
+### **Outlier Detection Using the IQR Method**
+
+The interquartile range (IQR) method flags any day whose demand falls below Q1 − 1.5 × IQR or above Q3 + 1.5 × IQR. The table below shows the limits and the number of outlier days for each region.
+
+```{python}
+#| label: demand-outliers
+#| tbl-cap: "Outlier Summary and IQR Thresholds by Region"
+# Calculate outlier limits for each region
+outlier_summary = []
+
+for region, data in train_data.groupby("unique_id"):
+    q1 = data["y"].quantile(0.25)
+    q3 = data["y"].quantile(0.75)
+    iqr = q3 - q1
+
+    lower = q1 - 1.5 * iqr
+    upper = q3 + 1.5 * iqr
+
+    # Count demand values outside the IQR limits
+    outlier_count = ((data["y"] < lower) | (data["y"] > upper)).sum()
+
+    outlier_summary.append({"Region": region,"Lower_Limit": lower,
+        "Upper_Limit": upper,"Outlier_Days": outlier_count})
+
+# Display outlier summary
+display(pd.DataFrame(outlier_summary).round(2))
+```
+
+The IQR method identified 56 outlier days in California, 132 in New York, and none in Texas. These observations may reflect genuine high-demand periods. They were retained because the IQR method alone does not confirm data errors.
+
+## Bivariate analysis
+
+Bivariate analysis examines how electricity demand changes with calendar variables, particularly weekdays and months.
+
+First, create the calendar columns once. Both analyses will use them.
+
+```{python}
+#| label: calendar-features
+
+eda_data = train_data[["unique_id", "ds", "y"]].copy()
+
+eda_data["Weekday"] = eda_data["ds"].dt.dayofweek
+eda_data["Month"] = eda_data["ds"].dt.month
+```
+
+### **Electricity Demand by Weekday**
+
+This figure helps determine whether electricity consumption differs between weekdays and weekends.
+
+```{python}
+#| label: weekday-demand
+#| fig-cap: "Daily Electricity Demand by Weekday"
+
+fig, axes = plt.subplots(1, 3, figsize=(13, 4))
+
+days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+for ax, region in zip(axes, ["CAL", "TEX", "NY"]):
+    data = eda_data[eda_data["unique_id"] == region]
+
+    values = [
+        data.loc[data["Weekday"] == day, "y"].dropna()
+        for day in range(7)]
+
+    ax.boxplot(values, showfliers=False)
+    ax.set_xticks(range(1, 8))
+    ax.set_xticklabels(days)
+    ax.set_title(region)
+    ax.set_ylabel("Daily Average Demand (MW)")
+    ax.grid(alpha=0.3)
+plt.tight_layout()
+plt.show()
+```
+
+-   Electricity demand is generally higher on weekdays than on weekends.
+-   Sunday typically has the lowest demand.
+-   The difference between weekdays and weekends is more noticeable in California and New York.
+-   Texas shows a smaller difference between weekdays and weekends.
+
+Electricity consumption changes depending on the day of the week. This suggests that weekly seasonality should be considered in forecasting models.
+
+### **Electricity Demand by Month**
+
+This figure helps identify seasonal differences in electricity demand throughout the year.
+
+```{python}
+#| label: fig-monthly-demand-comparison
+#| fig-cap: "Average Monthly Electricity Demand by Region"
+#| fig-width: 9
+#| fig-height: 4.5
+
+# Use complete calendar years from training data
+monthly_data = train_data.dropna(subset=["y"]).copy()
+monthly_data = monthly_data[
+    monthly_data["ds"].dt.year.between(2016, 2024)]
+
+# Extract month
+monthly_data["Month"] = monthly_data["ds"].dt.month
+
+# Calculate average daily demand for each month by region
+monthly_avg = (monthly_data
+    .groupby(["unique_id", "Month"])["y"]
+    .mean().reset_index())
+
+month_labels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+fig, ax = plt.subplots(figsize=(9, 4.5))
+
+# Plot all three regions together
+for region in ["CAL", "TEX", "NY"]:
+    data = monthly_avg[
+        monthly_avg["unique_id"] == region
+    ].sort_values("Month")
+
+    ax.plot(data["Month"],data["y"],marker="o",
+        linewidth=2,markersize=5,label=region)
+
+ax.set_xticks(range(1, 13))
+ax.set_xticklabels(month_labels)
+ax.set_xlabel("Month")
+ax.set_ylabel("Daily Average Demand (MW)")
+ax.legend(title="Region", frameon=False)
+ax.grid(alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+```
+
+- Texas has the highest average electricity demand throughout the year, followed by California and New York.
+- All three regions show higher demand during summer, especially in July and August.
+- Electricity demand is generally lower during the spring months.
+- Texas shows the largest seasonal variation in MW.
+- These patterns suggest that monthly seasonality should be considered when developing forecasting models.
+
+### **Correlation Between Regions**
+
+```{python}
+#| label: fig-regional-correlation
+#| fig-cap: "Correlation of Daily Electricity Demand Across Regions"
+#| fig-width: 2
+#| fig-height: 2
+#| out-width: "30%"
+
+# Arrange regional demand values by date
+regional_demand = train_data.pivot(
+    index="ds",columns="unique_id",values="y")
+
+# Calculate correlation between regions
+correlation = regional_demand.corr()
+
+# Plot correlation heatmap
+fig, ax = plt.subplots(figsize=(6, 5))
+
+heatmap = ax.imshow(correlation,
+    cmap="Blues",vmin=-1,vmax=1)
+
+# Add region labels
+ax.set_xticks(range(len(correlation.columns)))
+ax.set_yticks(range(len(correlation.index)))
+ax.set_xticklabels(correlation.columns)
+ax.set_yticklabels(correlation.index)
+
+# Display correlation values inside each cell
+for i in range(len(correlation)):
+    for j in range(len(correlation)):
+        ax.text(j, i, f"{correlation.iloc[i, j]:.2f}",ha="center", va="center")
+
+fig.colorbar(heatmap, ax=ax, label="Correlation")
+ax.set_title("Regional Demand Correlation")
+plt.tight_layout()
+plt.show()
+```
+
+The correlation heatmap shows positive relationships in daily electricity demand across all three regions. California and New York have the strongest correlation (0.61), followed by California and Texas (0.52). New York and Texas have the weakest correlation (0.41).
+
+The regions show moderate positive correlations, which may partly reflect shared seasonal patterns.
+
+## Time Series EDA
+
+Time series analysis examines how electricity demand changes over time, including long-term trends and recurring seasonal patterns.
+
+### **Historical Electricity Demand and Trend**
+
+This figure shows daily demand and a 365-day centered moving average for each region.
+
+We use an odd-numbered 365-day window to avoid the alignment issue associated with even-order centered moving averages.
+
+```{python}
+#| label: demand-trend
+#| fig-cap: "Historical Daily Demand and Long-Term Trend"
+
+fig, axes = plt.subplots(3, 1, figsize=(11, 9), sharex=True)
+
+for ax, region in zip(axes, ["CAL", "TEX", "NY"]):
+    data = train_data[train_data["unique_id"] == region].sort_values("ds")
+    trend = data["y"].rolling(window=365, center=True, min_periods=300
+    ).mean()
+
+    ax.plot(data["ds"], data["y"],label="Daily Demand", alpha=0.5)
+    ax.plot(data["ds"], trend,label="365-Day Moving Average", linewidth=2)
+    ax.set_title(region)
+    ax.set_ylabel("Demand (MW)")
+    ax.legend()
+    ax.grid(alpha=0.3)
+
+plt.xlabel("Date")
+plt.tight_layout()
+plt.show()
+```
+
+-   Texas shows a clear upward trend in electricity demand, increasing from approximately 39,000 MW to 55,000 MW.
+-   California and New York show relatively stable demand, with slight declines followed by periods of stability.
+-   The 365-day moving average helps highlight these long-term trends by smoothing daily fluctuations.
+
+### **Annual Seasonal Patterns**
+
+This figure compares daily electricity demand patterns across different years.
+
+We use complete calendar years (2016–2024) so that partial years do not distort the seasonal comparison. February 29 is excluded to align the calendar dates.
+
+```{python}
+#| label: annual-seasonality
+#| fig-cap: "Annual Seasonal Demand Patterns by Region"
+
+seasonal = train_data[
+    train_data["ds"].dt.year.between(2016, 2024)
+][["unique_id", "ds", "y"]].dropna().copy()
+
+# Remove leap day for consistent yearly comparison
+seasonal = seasonal[
+    seasonal["ds"].dt.strftime("%m-%d") != "02-29"].copy()
+
+seasonal["Year"] = seasonal["ds"].dt.year
+
+seasonal["Day"] = pd.to_datetime("2001-" + seasonal["ds"].dt.strftime("%m-%d")
+).dt.dayofyear
+
+fig, axes = plt.subplots(3, 1, figsize=(8, 10), sharex=True)
+
+for ax, region in zip(axes, ["CAL", "TEX", "NY"]):
+    data = seasonal[seasonal["unique_id"] == region]
+
+    for year, group in data.groupby("Year"):
+        ax.plot(group["Day"], group["y"],
+                linewidth=0.9, alpha=0.8, label=str(year))
+
+    ax.set_title(region, fontweight="bold")
+    ax.set_xlabel("Month")
+    ax.set_ylabel("Demand (MW)")
+    ax.set_xticks([1, 60, 121, 182, 244, 305])
+    ax.set_xticklabels(["Jan", "Mar", "May", "Jul", "Sep", "Nov"])
+    ax.grid(alpha=0.3)
+
+    if region == "CAL":
+        ax.legend(fontsize=7, ncol=3)
+
+plt.tight_layout()
+plt.show()
+```
+
+-   The yearly demand patterns are similar across different years.
+-   California, Texas, and New York show recurring seasonal patterns.
+-   Peak demand levels vary from year to year, particularly in California and Texas.
+-   High-demand days show greater variation and may be more difficult to forecast.
+
+Electricity demand follows recurring annual seasonal patterns, but the actual demand levels can change each year. Models should capture both annual seasonality and changes in peak demand.
+
+### **Autocorrelation Analysis**
+
+```{python}
+#| label: fig-autocorrelation
+#| fig-cap: "Autocorrelation of Daily Electricity Demand by Region"
+fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+
+for ax, region in zip(axes, ["CAL", "TEX", "NY"]):
+    demand = train_model[
+        train_model["unique_id"] == region
+    ]["y"]
+
+    plot_acf(demand, lags=28, ax=ax, title=region)
+    ax.set_xticks([0, 7, 14, 21, 28])
+    ax.set_xlabel("Lag (Days)")
+
+plt.tight_layout()
+plt.show()
+```
+
+-   All three regions show a strong relationship between current demand and previous days' demand.
+-   Lag 1 has the highest autocorrelation, indicating that demand is strongly related to the previous day's demand.
+-   Texas maintains relatively high autocorrelation across the 28 lags.
+-   California and New York show some evidence of weekly seasonality, while Texas shows a more gradual decline in autocorrelation
+
+Historical electricity demand is useful for predicting future demand. The strong relationship with previous days and the weekly pattern suggest that forecasting models should consider both recent demand and weekly seasonality.
+
+```{python}
+
+```
