@@ -1,0 +1,24 @@
+# ADS-506 Electricity Demand Forecasting — Python / Quarto
+#forecasting framework
+fpppy
+statsforecast
+utilsforecast
+
+# Data preparation and numerical analysis
+pandas
+numpy
+openpyxl
+
+# Time series diagnostics and statistical analysis
+statsmodels
+scipy
+
+# Plots
+matplotlib
+
+# Quarto Python execution
+jupyter
+ipykernel
+
+# holiday/calendar features
+holidays
