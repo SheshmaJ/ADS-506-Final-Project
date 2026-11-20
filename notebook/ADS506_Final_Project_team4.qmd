@@ -1329,3 +1329,1006 @@ for region in regions:
     else:
         print(f"{region}: review the series before fixing d. KPSS rejects both versions.")
 ```
+# **Initial Model Development**
+
+The purpose of this stage is to establish an initial set of forecasting candidates for
+California, Texas, and New York. Each model is fitted using **training observations
+only** (through September 30, 2025). We retain the fitted model objects and report
+specifications and estimated parameters. We do **not** use the final holdout to
+compare models or select winners. Forecast accuracy will be assessed using the same
+expanding-window origins and seven forecast horizons during rolling-origin cross-validation.
+
+The weekly seasonal-naïve model is the baseline. ETS and ARIMA capture historical
+level, trend, seasonality and serial dependence. Regression models examine whether
+known-in-advance trend, weekday and annual Fourier predictors improve forecasts.
+The manual ARIMA is an **initial** specification informed by training-only KPSS
+results; its order is not yet presented as an optimal choice.
+
+## Define candidate models and check available predictors
+
+```{python}
+#| label: initial-candidate-definitions
+#| tbl-cap: "Initial Forecasting Model Candidate Specifications"
+
+from statsforecast.models import (
+    SeasonalNaive, AutoETS, ARIMA, AutoARIMA, SklearnModel
+)
+from fpppy.models import LinearRegression
+import warnings
+
+# Reuse only features, training series and diagnostic results established above.
+# No holdout demand values enter the models in this section.
+initial_predictor_sets = {
+    "SNAIVE": [],
+    "AutoETS": [],
+    "ARIMA_manual": [],
+    "AutoARIMA": [],
+    "TSLM_trend": ["trend"],
+    "TSLM_weekday": ["trend"] + weekday_cols,
+    "TSLM_fourier": ["trend"] + weekday_cols + fourier_cols,
+    "ARIMA_dynamic": arima_x_cols,
+    "AutoARIMA_dynamic": arima_x_cols,
+}
+
+# Preliminary ARIMA differencing uses the earlier KPSS diagnostics.
+# If the level series rejects stationarity, use one regular difference.
+# Seasonal differencing D=0 is a provisional manual starting point.
+initial_manual_d = {}
+for region in regions:
+    tests = stationarity.loc[
+        stationarity["Region"] == region
+    ].set_index("Series")
+    level_reject = bool(tests.loc["Original MW", "Reject stationarity at 5%"])
+    diff_reject = bool(tests.loc["First difference", "Reject stationarity at 5%"])
+    if level_reject and diff_reject:
+        print(f"{region}: KPSS rejects both series; manual d=1 is provisional.")
+    initial_manual_d[region] = 1 if level_reject else 0
+
+
+def initial_model_factory(name, d):
+    """Return a fresh, unfitted StatsForecast-compatible model."""
+    if name == "SNAIVE":
+        return SeasonalNaive(season_length=7)
+    if name == "AutoETS":
+        return AutoETS(season_length=7, model="ZZZ")
+    if name == "ARIMA_manual":
+        return ARIMA(order=(1, d, 1), seasonal_order=(1, 0, 1),
+                     season_length=7)
+    if name == "AutoARIMA":
+        return AutoARIMA(season_length=7, stepwise=True)
+    if name.startswith("TSLM_"):
+        # The fpppy model includes its own intercept: do not add one to X.
+        return SklearnModel(LinearRegression())
+    if name == "ARIMA_dynamic":
+        return ARIMA(order=(1, d, 1), seasonal_order=(1, 0, 1),
+                     season_length=7)
+    if name == "AutoARIMA_dynamic":
+        return AutoARIMA(season_length=7, stepwise=True)
+    raise ValueError(f"Unexpected model: {name}")
+
+
+def initial_specification(name, d):
+    if name == "SNAIVE":
+        return "Weekly seasonal naive, m=7"
+    if name == "AutoETS":
+        return "AutoETS(ZZZ), m=7; ETS components chosen by model"
+    if name in ("ARIMA_manual", "ARIMA_dynamic"):
+        return f"Manual ARIMA(1,{d},1)(1,0,1)[7]"
+    if name in ("AutoARIMA", "AutoARIMA_dynamic"):
+        return "AutoARIMA, m=7; orders selected from training data"
+    return "fpppy LinearRegression (ordinary least squares, with intercept)"
+
+initial_spec_rows = []
+for region in regions:
+    for candidate, cols in initial_predictor_sets.items():
+        initial_spec_rows.append({
+            "Region": region,
+            "Model": candidate,
+            "Model specification": initial_specification(
+                candidate, initial_manual_d[region]),
+            "Predictors": ", ".join(cols) if cols else "None",
+            "Fourier K": fourier_k if any(c.startswith("sin_") for c in cols) else "—",
+        })
+
+initial_spec_table = pd.DataFrame(initial_spec_rows)
+display(initial_spec_table)
+```
+
+**Predictor pairing:** `ARIMA_manual` versus `ARIMA_dynamic` and
+`AutoARIMA` versus `AutoARIMA_dynamic` compare models with and without
+weekday/Fourier predictors. `TSLM_weekday` versus `TSLM_fourier` isolates the
+contribution of annual Fourier terms. `TSLM_trend` provides an additional
+regression baseline. All predictors are derived from dates known at the
+forecast origin. Holiday flags remain optional and are not included here.
+
+## Fit each model on the full training period
+
+```{python}
+#| label: initial-fit-candidates
+#| tbl-cap: "Initial Candidate Model Fit Status by Region"
+
+# Set to True for a quick first run; restore False for the full initial-model output.
+initial_pilot = False
+initial_regions_to_fit = ["CAL"] if initial_pilot else regions
+initial_models_to_fit = (
+    ["SNAIVE", "TSLM_trend", "TSLM_weekday", "TSLM_fourier"]
+    if initial_pilot else list(initial_predictor_sets)
+)
+
+# Align the partner's forward-filled training response and calendar features.
+# validate='one_to_one' protects against accidental duplicate dates.
+initial_training = train_model[["unique_id", "ds", "y"]].merge(
+    train_features[["unique_id", "ds"] + tslm_x_cols],
+    on=["unique_id", "ds"], how="left", validate="one_to_one"
+).sort_values(["unique_id", "ds"]).reset_index(drop=True)
+assert initial_training["ds"].max() <= train_end
+assert initial_training["y"].notna().all()
+assert np.isfinite(initial_training[tslm_x_cols].to_numpy()).all()
+
+# Fitted objects are retained for model diagnostics and parameter analysis.
+initial_fitted = {}
+initial_fit_rows = []
+for region in initial_regions_to_fit:
+    for candidate in initial_models_to_fit:
+        predictors = initial_predictor_sets[candidate]
+        region_df = initial_training.loc[
+            initial_training["unique_id"] == region,
+            ["unique_id", "ds", "y"] + predictors
+        ].copy()
+        assert region_df["ds"].is_unique
+        assert region_df["ds"].diff().dropna().eq(pd.Timedelta(days=1)).all()
+        try:
+            with warnings.catch_warnings(record=True) as messages:
+                warnings.simplefilter("always")
+                forecaster = StatsForecast(
+                    models=[initial_model_factory(
+                        candidate, initial_manual_d[region])],
+                    freq="D", n_jobs=1
+                )
+                forecaster.fit(df=region_df)
+            initial_fitted[(region, candidate)] = forecaster
+            status = "Fitted"
+            problem = " | ".join(str(m.message) for m in messages[:3])
+        except Exception as exc:
+            status = "Review needed"
+            problem = f"{type(exc).__name__}: {exc}"
+        initial_fit_rows.append({
+            "Region": region, "Model": candidate,
+            "Training rows": len(region_df),
+            "Status": status,
+            "Warnings / errors": problem[:500],
+        })
+
+initial_fit_status = pd.DataFrame(initial_fit_rows)
+display(initial_fit_status)
+if (initial_fit_status["Status"] != "Fitted").any():
+    print("Investigate any failed fits before cross-validation or selecting finalists.")
+```
+
+## Record fitted model parameters
+
+`StatsForecast` stores fitted model internals differently for ETS, ARIMA and the
+regression wrapper. We inspect only supported, available fields and record
+missing fields as unavailable instead of assuming an R-style `report()` output.
+The fitted TSLM wrapper uses `LinearRegression` as its output model name (rather
+than the descriptive candidate label); retaining that name is important for the
+`fpppy` prediction-interval method used in later steps.
+
+```{python}
+#| label: initial-model-parameters
+#| tbl-cap: "Selected Fitted Parameters and Estimated Coefficients"
+
+
+def initial_short(value, max_items=18):
+    """Compact model metadata: omit full fitted series and state arrays."""
+    if isinstance(value, dict):
+        values = list(value.items())[:max_items]
+        return ", ".join(f"{key}={initial_short(val)}" for key, val in values)
+    if isinstance(value, (list, tuple, np.ndarray)):
+        vals = np.asarray(value).ravel()
+        return ", ".join(f"{v:.5g}" if np.isscalar(v) and
+                         isinstance(v, (int, float, np.number)) else str(v)
+                         for v in vals[:max_items])
+    if isinstance(value, (int, float, np.number)):
+        return f"{value:.5g}"
+    return str(value)
+
+
+def initial_parameter_record(forecaster, candidate, predictor_names):
+    fitted = forecaster.fitted_[0][0]
+    core = getattr(fitted, "model_", {})
+    details = {"Underlying object": type(fitted).__name__}
+    if isinstance(core, dict):
+        # Nixtla ARIMA model stores the ARMA order vector and named coefficients.
+        # ETS exposes its selected components and smoothing parameters in model_.
+        for key in ("arma", "components", "method", "coef", "par",
+                    "names", "alpha", "beta", "gamma", "phi",
+                    "sigma2", "aic", "aicc", "bic"):
+            if key in core and core[key] is not None:
+                details[key] = initial_short(core[key])
+        if candidate.startswith("TSLM_"):
+            reg = core.get("model")
+            if reg is not None:
+                beta = getattr(reg, "coef_", None)
+                intercept = getattr(reg, "intercept_", None)
+                if intercept is not None:
+                    details["intercept"] = initial_short(intercept)
+                if beta is not None:
+                    coef_array = np.asarray(beta).ravel()
+                    details["regression coefficients"] = initial_short(dict(
+                        zip(predictor_names, coef_array)))
+    return details
+
+initial_param_rows = []
+for (region, candidate), fitted_forecaster in initial_fitted.items():
+    details = initial_parameter_record(
+        fitted_forecaster, candidate, initial_predictor_sets[candidate])
+    initial_param_rows.append({
+        "Region": region, "Model": candidate,
+        "Initial specification": initial_specification(
+            candidate, initial_manual_d[region]),
+        "Predictor names": ", ".join(initial_predictor_sets[candidate]) or "None",
+        "Available parameter details": "; ".join(
+            f"{key}: {value}" for key, value in details.items()),
+    })
+initial_parameter_table = pd.DataFrame(initial_param_rows)
+display(initial_parameter_table)
+```
+
+## Interpretation and next step
+
+These fits establish an initial collection of candidates; **no best model is
+selected here**. The parameter table documents the model families and estimated
+specifications so that we can later compare them with refitted results. Next, we will examine fitted residuals and Ljung–Box tests.
+During rolling-origin cross-validation, we will refit each candidate at the **same 882 expanding-window training origins** and
+score forecasts separately for Days 1–7. Log/Box-Cox variants, if evaluated,
+will require a transformation fitted separately in each training fold; their
+forecasts must be returned to original MW units for all accuracy comparisons.
+
+
+# **Model Refitting and Diagnostics**
+
+This section examines **one-step, in-sample fitted errors from the training period** to
+check residual patterns, seasonal autocorrelation, and distributional assumptions.
+These checks complement—not replace—the seven-day, out-of-sample comparisons
+planned for rolling-origin cross-validation. All calculations below are limited
+to observations **on or before September 30, 2025**.
+
+We reuse the full-training fits created in Initial Model Development. The optional
+refitting experiment compares estimates from the truncated training period ending
+September 30, 2024 with the full pre-holdout training period. This is a descriptive
+parameter-stability check, not a substitute for rolling-origin evaluation.
+
+## Examine fitted residuals and Ljung–Box tests
+
+```{python}
+#| label: diagnostic-residual-summary
+#| tbl-cap: "In-sample residual diagnostics by region and model"
+
+from statsmodels.stats.diagnostic import acorr_ljungbox
+from statsmodels.graphics.gofplots import qqplot
+
+# All nine candidate fits for all three regions must have succeeded first.
+expected_fits = {(region, candidate) for region in regions
+                 for candidate in initial_predictor_sets}
+missing_fits = expected_fits.difference(initial_fitted)
+assert not missing_fits, (
+    "Run the complete Initial Model Development fit cell first. "
+    f"Missing examples: {sorted(missing_fits)[:5]}"
+)
+
+# Use the same 28-day warm-up for each model to limit initialization effects.
+# Forecast accuracy will NOT be based on these in-sample errors.
+diagnostic_warmup_days = 28
+diagnostic_residuals = {}
+diagnostic_rows = []
+
+for (region, candidate), forecaster in initial_fitted.items():
+    region_train = (initial_training.loc[
+        initial_training["unique_id"] == region, ["ds", "y"]]
+        .sort_values("ds").reset_index(drop=True))
+    underlying_fit = forecaster.fitted_[0][0]
+    in_sample_result = underlying_fit.predict_in_sample()
+    in_sample_fit = np.asarray(in_sample_result["fitted"], dtype=float).reshape(-1)
+    if len(in_sample_fit) != len(region_train):
+        raise ValueError(
+            f"Fitted length mismatch for {region}/{candidate}: "
+            f"{len(in_sample_fit)} versus {len(region_train)}"
+        )
+
+    record = region_train.copy()
+    record["fitted"] = in_sample_fit
+    record["resid"] = record["y"] - record["fitted"]
+    record = record.iloc[diagnostic_warmup_days:].copy()
+    record = record.replace([np.inf, -np.inf], np.nan).dropna(subset=["resid"])
+    if len(record) < 100:
+        raise ValueError(f"Too few valid training residuals for {region}/{candidate}.")
+    record["unique_id"] = region
+    record["Model"] = candidate
+    diagnostic_residuals[(region, candidate)] = record
+
+    values = record["resid"].to_numpy()
+    tests = acorr_ljungbox(values, lags=[7, 14, 28], return_df=True)
+    diagnostic_rows.append({
+        "Region": region,
+        "Model": candidate,
+        "Residual observations": len(record),
+        "Mean error (MW)": float(values.mean()),
+        "Residual SD (MW)": float(values.std(ddof=1)),
+        "Lag-7 residual ACF": float(pd.Series(values).autocorr(lag=7)),
+        "Ljung–Box p (lag 7)": float(tests.loc[7, "lb_pvalue"]),
+        "Ljung–Box p (lag 14)": float(tests.loc[14, "lb_pvalue"]),
+        "Ljung–Box p (lag 28)": float(tests.loc[28, "lb_pvalue"]),
+        "Autocorrelation flag (lag 28)":
+            "Review" if tests.loc[28, "lb_pvalue"] < 0.05 else "Not detected",
+    })
+
+diagnostic_summary = pd.DataFrame(diagnostic_rows).sort_values(
+    ["Region", "Model"]
+).reset_index(drop=True)
+display(diagnostic_summary.round(4))
+print("Ljung–Box p-values are unadjusted for the number of fitted parameters; ")
+print("they are screening diagnostics, not definitive model-selection criteria.")
+```
+
+A small Ljung–Box p-value indicates evidence of serial correlation left in the
+residuals. We report three lags to inspect weekly dependence. The test's
+standard unadjusted degrees of freedom are used consistently for initial
+screening; parameter-adjusted inference may differ by model family. Model
+selection will rely primarily on **out-of-sample** forecast performance.
+
+## Inspect residual plots and Q–Q plots
+
+The default display focuses on three complementary models in each region
+(the benchmark, automatic ARIMA, and regression with Fourier predictors),
+so Jupyter does not create dozens of figures. Change `diagnostic_plot_models`
+to `list(initial_predictor_sets)` if you need every candidate's plots.
+
+```{python}
+#| label: diagnostic-residual-plots
+#| fig-cap: "Residual time plots, ACF, histograms, and normal Q–Q diagnostics"
+
+# fpppy.utils.plot_diagnostics was imported in the notebook setup cell.
+diagnostic_plot_models = ["SNAIVE", "AutoARIMA", "TSLM_fourier"]
+for region in regions:
+    for candidate in diagnostic_plot_models:
+        record = diagnostic_residuals[(region, candidate)]
+        print(f"Residual diagnostics: {region} / {candidate}")
+        plot_diagnostics(record[["ds", "resid"]].copy())
+        # fpppy's plot_diagnostics displays its own figure.
+        # Do not call plt.show() again for that figure.
+        fig = qqplot(record["resid"].to_numpy(), line="s")
+        fig.axes[0].set_title(f"{region} / {candidate}: normal Q–Q plot")
+        fig.tight_layout()
+        plt.show()
+```
+
+Look for residuals centered around zero without systematic trends, consistent
+variation over time, and no substantial unexplained correlation at multiples
+of seven days. Departures from the Q–Q reference line suggest that normality-
+based prediction intervals may need caution. A normal residual distribution
+is not required for point forecasts to be useful.
+
+## Parameter stability under a pre-holdout refit
+
+This optional experiment refits models to an earlier *training-only* endpoint
+(September 30, 2024), then compares available numerical parameter estimates
+with fits through September 30, 2025. To keep a first Jupyter run quick, the
+default tests three simple models for California. Set
+`diagnostic_refit_pilot = False` to evaluate all regions and candidates.
+
+```{python}
+#| label: diagnostic-refit-comparison
+#| tbl-cap: "Pre-holdout parameter stability from truncated versus full training"
+
+diagnostic_refit_pilot = True
+refit_regions = ["CAL"] if diagnostic_refit_pilot else regions
+refit_candidates = (
+    ["SNAIVE", "TSLM_trend", "TSLM_fourier"]
+    if diagnostic_refit_pilot else list(initial_predictor_sets)
+)
+refit_cutoff = pd.Timestamp("2024-09-30")
+assert refit_cutoff < train_end
+
+
+def diagnostic_numeric_parameters(fitted_model, predictors):
+    """Read available numeric estimates without assuming universal model internals."""
+    params = {}
+    core = getattr(fitted_model, "model_", None)
+    if not isinstance(core, dict):
+        return params
+    for key in ("alpha", "beta", "gamma", "phi", "sigma2", "aic", "bic"):
+        if key in core and np.isscalar(core[key]) and core[key] is not None:
+            try:
+                params[key] = float(core[key])
+            except (ValueError, TypeError):
+                pass
+    if isinstance(core.get("coef"), dict):
+        for key, value in core["coef"].items():
+            if np.isscalar(value):
+                try:
+                    params[f"coef:{key}"] = float(value)
+                except (ValueError, TypeError):
+                    pass
+    reg = core.get("model")
+    if reg is not None:
+        intercept = getattr(reg, "intercept_", None)
+        if intercept is not None and np.asarray(intercept).size == 1:
+            params["intercept"] = float(np.asarray(intercept).item())
+        beta = getattr(reg, "coef_", None)
+        if beta is not None:
+            for name, value in zip(predictors, np.asarray(beta).ravel()):
+                params[f"regression:{name}"] = float(value)
+    return params
+
+refit_status_rows = []
+parameter_difference_rows = []
+for region in refit_regions:
+    for candidate in refit_candidates:
+        features = initial_predictor_sets[candidate]
+        previous_period = initial_training.loc[
+            (initial_training["unique_id"] == region) &
+            (initial_training["ds"] <= refit_cutoff),
+            ["unique_id", "ds", "y"] + features
+        ].copy()
+        try:
+            comparison_fit = StatsForecast(
+                models=[initial_model_factory(candidate, initial_manual_d[region])],
+                freq="D", n_jobs=1
+            )
+            comparison_fit.fit(df=previous_period)
+            earlier_model = comparison_fit.fitted_[0][0]
+            later_model = initial_fitted[(region, candidate)].fitted_[0][0]
+            earlier_values = diagnostic_numeric_parameters(earlier_model, features)
+            later_values = diagnostic_numeric_parameters(later_model, features)
+            for key in sorted(set(earlier_values) | set(later_values)):
+                old = earlier_values.get(key, np.nan)
+                new = later_values.get(key, np.nan)
+                parameter_difference_rows.append({
+                    "Region": region, "Model": candidate, "Parameter": key,
+                    "Through 2024-09-30": old,
+                    "Through 2025-09-30": new,
+                    "Change": new - old,
+                })
+            refit_status_rows.append({
+                "Region": region, "Model": candidate,
+                "Earlier training rows": len(previous_period),
+                "Refit status": "Fitted",
+                "Earlier specification": initial_specification(
+                    candidate, initial_manual_d[region]),
+                "Earlier details": str(initial_parameter_record(
+                    comparison_fit, candidate, features))[:600],
+            })
+        except Exception as exc:
+            refit_status_rows.append({
+                "Region": region, "Model": candidate,
+                "Earlier training rows": len(previous_period),
+                "Refit status": f"Review: {type(exc).__name__}: {exc}",
+                "Earlier specification": initial_specification(
+                    candidate, initial_manual_d[region]),
+                "Earlier details": "Unavailable",
+            })
+
+refit_status = pd.DataFrame(refit_status_rows)
+refit_parameters = pd.DataFrame(parameter_difference_rows)
+display(refit_status)
+if not refit_parameters.empty:
+    display(refit_parameters.round(4))
+else:
+    print("No comparable numeric coefficients exposed by the fitted model objects.")
+```
+
+Changes in parameter estimates are descriptive evidence of sensitivity to the
+training window, not a reason to select a model using holdout data. For automatic
+ETS or ARIMA models, selected structures can also change as the training
+window expands. The final model structure will be frozen only after
+cross-validation.
+
+## Optional log-scale diagnostic comparison
+
+The earlier transformation assessment examined the marginal distribution and
+level–spread relationship of the series; it did **not** establish that a
+transformation improves forecasts. The code below optionally compares an
+AutoETS model on original MW values with an AutoETS model fitted on log demand.
+For a fair comparison, log-model in-sample fitted values are returned to MW
+using `exp` (a median-scale reconstruction). This is an **in-sample diagnostic
+comparison**, not proof of improved predictive performance. The definitive
+decision belongs to rolling-origin cross-validation.
+
+```{python}
+#| label: diagnostic-log-scale-check
+#| tbl-cap: "Optional untransformed versus log-transformed in-sample diagnostics"
+
+run_log_diagnostic = False  # Set True to run an extra AutoETS fit per region.
+log_comparison_rows = []
+if run_log_diagnostic:
+    for region in regions:
+        base = initial_training.loc[
+            initial_training["unique_id"] == region,
+            ["unique_id", "ds", "y"]
+        ].copy().reset_index(drop=True)
+        assert (base["y"] > 0).all(), "Log demand requires positive values."
+        transformed = base.assign(y=np.log(base["y"]))
+        log_fit = StatsForecast(
+            models=[AutoETS(season_length=7, model="ZZZ")],
+            freq="D", n_jobs=1
+        )
+        log_fit.fit(df=transformed)
+        log_pred = np.asarray(
+            log_fit.fitted_[0][0].predict_in_sample()["fitted"], dtype=float
+        ).reshape(-1)
+        reconstructed_mw = np.exp(log_pred)
+        untransformed = diagnostic_residuals[(region, "AutoETS")]
+        log_eval = base.copy()
+        log_eval["resid"] = log_eval["y"] - reconstructed_mw
+        log_eval = log_eval.iloc[diagnostic_warmup_days:].dropna(subset=["resid"])
+        # Both versions are evaluated on the same available training dates.
+        compare = untransformed[["ds", "resid"]].merge(
+            log_eval[["ds", "resid"]], on="ds", suffixes=("_MW", "_log")
+        )
+        for scale, col in [("Original MW", "resid_MW"),
+                           ("Log, inverse to MW", "resid_log")]:
+            err = compare[col].to_numpy()
+            log_comparison_rows.append({
+                "Region": region, "Fitting scale": scale,
+                "In-sample MAE (MW)": np.mean(np.abs(err)),
+                "In-sample mean error (MW)": np.mean(err),
+                "In-sample residual SD (MW)": np.std(err, ddof=1),
+            })
+    display(pd.DataFrame(log_comparison_rows).round(3))
+else:
+    print("Optional transformation refits skipped; no transformation advantage is claimed.")
+```
+
+## Interpretation and next step
+
+These diagnostic summaries identify patterns that models may not explain, but
+in-sample residual behavior alone cannot establish forecast accuracy. The
+rolling-origin analysis will use identical expanding training windows,
+forecast Days 1–7 separately, and compare errors in original **MW** units. It
+will also test whether any transformation or additional known-ahead predictor
+provides a meaningful benefit. No holdout targets have been used here.
+
+
+# Rolling-Origin Cross-Validation and Final Forecast Evaluation
+
+For a computationally feasible analysis under the project deadline, we compare four models on the full scheduled **882 training origins per region** rather than conducting full-origin cross-validation for all original candidates. The candidates are weekly Seasonal Naive, trend regression, trend with weekday indicators, and trend with weekday indicators and annual Fourier terms (K=3). This design preserves the 7-day forecast horizon and the 3-day origin spacing. Regression refits are computed using the same ordinary-least-squares solution as the project's Python regression framework, with prefix-only sufficient statistics for efficiency.
+
+```{python}
+#| label: verified-full-cv-and-final-evaluation
+#| echo: true
+# Self-contained forecasting pipeline for the four fully evaluated candidates.
+# No separate ADS506_finish_today.py file is required.
+"""ADS-506 | Same-day, transparently reduced candidate-set workflow (Steps 15–21).
+
+Run only AFTER the current staged CV has completed and after the original
+project notebook has run its data preparation and feature engineering:
+
+    %run -i "ADS506_finish_today.py"
+
+This completes all 882 TRAINING CV origins and all 120 HOLDOUT origins for four
+fast candidates: SNAIVE, TSLM_trend, TSLM_weekday, TSLM_fourier. It does NOT
+claim that ARIMA, ETS, Box-Cox, or other candidates received full CV.
+
+Linear-regression models use incremental sufficient statistics for *exact*
+ordinary least squares refits, mathematically equivalent (up to floating-point
+precision) to fpppy.models.LinearRegression with intercept. Only observations
+through each expanding-window origin enter its model fit. No holdout-dependent
+hyperparameter or model selection is performed.
+"""
+
+from pathlib import Path
+import json
+import math
+import warnings
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from IPython.display import display
+
+# ---------------------------------------------------------------------------
+# Configuration and validation
+# ---------------------------------------------------------------------------
+FAST_MODELS = ["SNAIVE", "TSLM_trend", "TSLM_weekday", "TSLM_fourier"]
+OUT = Path.cwd() / "finish_today_outputs"
+OUT.mkdir(exist_ok=True, parents=True)
+required = ["daily_demand", "train_data", "test_data", "cv_origins",
+            "holdout_origins", "train_end", "regions", "fourier_k",
+            "calendar_features", "demand_thresholds", "initial_predictor_sets"]
+missing = [key for key in required if key not in globals()]
+if missing:
+    raise RuntimeError("Run the initial project notebook first; missing: " + ", ".join(missing))
+if len(cv_origins) != 882 or len(holdout_origins) != 120:
+    raise AssertionError("Expected 882 training origins and 120 final holdout origins.")
+if sorted(set(regions)) != sorted(["CAL", "TEX", "NY"]):
+    raise AssertionError("Expected CAL, TEX and NY regions.")
+if int(horizon) != 7:
+    raise AssertionError("Expected a 7-day forecast horizon.")
+
+train_end = pd.Timestamp(train_end)
+cv_dates = pd.DatetimeIndex(cv_origins)
+holdout_dates = pd.DatetimeIndex(holdout_origins)
+if cv_dates.max() >= train_end:
+    raise AssertionError("CV origins must remain in training period.")
+if holdout_dates.min() != train_end:
+    raise AssertionError("Holdout must start at 2025-09-30 cutoff.")
+
+last_holdout_target = holdout_dates.max() + pd.Timedelta(days=7)
+assert last_holdout_target == pd.Timestamp("2026-09-29")
+
+# All outputs in original MW; ME = observed - predicted.
+# Frozen feature sets from earlier work: no refitting Fourier K using holdout.
+predictor_sets = {name: list(initial_predictor_sets[name]) for name in FAST_MODELS}
+assert predictor_sets["SNAIVE"] == []
+
+threshold_map = demand_thresholds.set_index("unique_id")["P95_Demand_MW"].astype(float).to_dict()
+if set(threshold_map) != set(regions):
+    raise AssertionError("P95 thresholds should come from training data in all regions.")
+
+all_daily = daily_demand[["unique_id", "ds", "y"]].copy()
+all_daily["ds"] = pd.to_datetime(all_daily["ds"])
+if all_daily.duplicated(["unique_id", "ds"]).any():
+    raise ValueError("Duplicate regional daily observations.")
+
+def _region_cache(region):
+    d = all_daily.loc[all_daily.unique_id == region].sort_values("ds").copy()
+    dates = pd.DatetimeIndex(d["ds"])
+    if len(dates) != 4110 or not (dates.to_series().diff().dropna() == pd.Timedelta(days=1)).all():
+        raise AssertionError(f"{region}: unexpected date count/continuity")
+    raw = d["y"].to_numpy(dtype=float)
+    # Missing training/holdout observations filled only with the previous known value.
+    imputed = pd.Series(raw).ffill().to_numpy(dtype=float)
+    if not np.isfinite(imputed).all() or (imputed <= 0).any():
+        raise AssertionError(f"{region}: invalid demand after causal imputation")
+    feats = calendar_features(d[["unique_id", "ds"]], int(fourier_k))
+    features = {}
+    for model, predictors in predictor_sets.items():
+        if model == "SNAIVE":
+            continue
+        x = np.column_stack((np.ones(len(d)), feats[predictors].to_numpy(dtype=float)))
+        # Prefix-only OLS sufficient statistics: sums at index i contain rows <= i.
+        xx = np.cumsum(x[:, :, None] * x[:, None, :], axis=0)
+        xy = np.cumsum(x * imputed[:, None], axis=0)
+        features[model] = (x, xx, xy)
+    lookup = pd.Series(np.arange(len(dates)), index=dates)
+    lag = np.r_[np.zeros(7), np.abs(imputed[7:] - imputed[:-7])]
+    lag_cum = np.cumsum(lag)
+    return {"dates":dates,"raw":raw,"y":imputed,"features":features,
+            "lookup":lookup,"lag_cum":lag_cum}
+
+caches = {region: _region_cache(region) for region in regions}
+
+# Check that data imputation and the features match the team's training data.
+for region, cache in caches.items():
+    end = int(cache["lookup"].loc[train_end])
+    team_y = (initial_training.loc[initial_training["unique_id"] == region]
+              .sort_values("ds")["y"].to_numpy(dtype=float))
+    if not np.allclose(cache["y"][:end+1], team_y):
+        raise AssertionError(f"{region}: current data differs from team training series")
+
+
+def _ols_predict(cache, model, cutoff_i, horizon=7):
+    x, xx, xy = cache["features"][model]
+    try:
+        beta = np.linalg.solve(xx[cutoff_i], xy[cutoff_i])
+    except np.linalg.LinAlgError:
+        # Only the current fold is used in this fallback.
+        beta, *_ = np.linalg.lstsq(x[:cutoff_i+1], cache["y"][:cutoff_i+1], rcond=None)
+    return x[cutoff_i+1:cutoff_i+1+horizon] @ beta
+
+
+def _predict(cache, model, cutoff_i):
+    if model == "SNAIVE":
+        # Same weekdays in the previous week, for the next seven dates.
+        pred = cache["y"][cutoff_i-6:cutoff_i+1].copy()
+    else:
+        pred = _ols_predict(cache, model, cutoff_i)
+    if len(pred) != 7 or not np.isfinite(pred).all() or (pred <= 0).any():
+        raise ValueError(f"{model}: non-positive, missing, or incomplete forecasts")
+    return pred
+
+
+def _rows_for_origin(cache, region, model, origin, stage, mase_denominator=None):
+    cutoff_i = int(cache["lookup"].loc[pd.Timestamp(origin)])
+    prediction = _predict(cache, model, cutoff_i)
+    if mase_denominator is None:
+        # Weekly naive absolute-error denominator for this expanding training fold.
+        denominator = cache["lag_cum"][cutoff_i] / (cutoff_i - 6)
+    else:
+        denominator = mase_denominator
+    if not np.isfinite(denominator) or denominator <= 0:
+        raise ValueError("Invalid MASE denominator")
+    output = []
+    for h in range(1, 8):
+        j = cutoff_i + h
+        actual = cache["raw"][j]
+        if stage == "Training CV" and cache["dates"][j] > train_end:
+            raise AssertionError("Training CV leaked into holdout")
+        if stage == "Holdout" and not (train_end < cache["dates"][j] <= pd.Timestamp("2026-09-29")):
+            raise AssertionError("Holdout date range was violated")
+        output.append({"Stage":stage,"Region":region,"Model":model,
+                       "Origin":pd.Timestamp(origin),"Target_Date":cache["dates"][j],
+                       "Horizon":h,"Actual_MW":actual,"Forecast_MW":float(prediction[h-1]),
+                       "MASE_Denominator_MW":float(denominator)})
+    return output
+
+
+def _metrics(frame, keys):
+    valid = frame.loc[np.isfinite(frame["Actual_MW"]),:].copy()
+    valid["ME_Error"] = valid["Actual_MW"] - valid["Forecast_MW"]
+    valid["Absolute_Error"] = valid["ME_Error"].abs()
+    valid["Sq_Error"] = valid["ME_Error"] ** 2
+    valid["APE"] = 100 * valid["Absolute_Error"] / valid["Actual_MW"]
+    valid["Scaled_Absolute_Error"] = valid["Absolute_Error"] / valid["MASE_Denominator_MW"]
+    summary = valid.groupby(keys, as_index=False).agg(
+        Scored_Targets=("ME_Error", "size"),
+        ME_MW=("ME_Error", "mean"),
+        MAE_MW=("Absolute_Error", "mean"),
+        MSE_MW=("Sq_Error", "mean"),
+        MAPE_pct=("APE", "mean"),
+        MASE=("Scaled_Absolute_Error", "mean")
+    )
+    summary["RMSE_MW"] = np.sqrt(summary.pop("MSE_MW"))
+    return summary, valid
+
+# ---------------------------------------------------------------------------
+# 15: FULL-SCHEDULE CV for four budget-friendly candidates (not all 11 models)
+# ---------------------------------------------------------------------------
+print("Running 882 expanding-window training origins per region/model ...", flush=True)
+cv_records = []
+for region in regions:
+    cache = caches[region]
+    for model in FAST_MODELS:
+        for origin in cv_dates:
+            cv_records.extend(_rows_for_origin(cache, region, model, origin, "Training CV"))
+        print(f"Training CV: {region}/{model}: {len(cv_dates)} origins", flush=True)
+    # Save one checkpoint per region.
+    pd.DataFrame(cv_records).to_csv(OUT / "cv_completed_so_far.csv", index=False)
+cv_all = pd.DataFrame(cv_records)
+cv_counts = cv_all.groupby(["Region", "Model", "Horizon"])["Origin"].nunique()
+assert (cv_counts == 882).all() and len(cv_all) == len(regions)*len(FAST_MODELS)*882*7
+cv_score, cv_valid = _metrics(cv_all, ["Region", "Model", "Horizon"])
+cv_overall, _ = _metrics(cv_all, ["Region", "Model"])
+cv_score["Forecast_Origins"] = 882
+cv_all.to_csv(OUT / "cv_predictions_882_origins.csv", index=False)
+cv_score.to_csv(OUT / "cv_metrics_by_region_model_horizon.csv", index=False)
+cv_overall.to_csv(OUT / "cv_overall_scores.csv", index=False)
+print("\nTraining CV model comparison (lower MASE is better):")
+display(cv_overall.sort_values(["Region", "MASE"]).round(3))
+
+# ---------------------------------------------------------------------------
+# 16: Training-only candidate forecasts with empirical CV 80% and 95% bands
+# ---------------------------------------------------------------------------
+cv_valid["Error_MW"] = cv_valid["Actual_MW"] - cv_valid["Forecast_MW"]
+for region in regions:
+    ca = caches[region]
+    date = cv_dates[-1]
+    i = int(ca["lookup"].loc[date])
+    history_start = max(i - 90, 0)
+    fig, ax = plt.subplots(figsize=(11, 4.5))
+    ax.plot(ca["dates"][history_start:i+1], ca["raw"][history_start:i+1],
+            label="Observed training demand", color="#404040", linewidth=1)
+    future_dates = ca["dates"][i+1:i+8]
+    for model in FAST_MODELS:
+        pred = _predict(ca, model, i)
+        ax.plot(future_dates, pred, marker="o", linewidth=1.1, label=model)
+        # All intervals are empirical CV residual bands, not native model intervals.
+        sub = cv_valid.loc[(cv_valid.Region == region) & (cv_valid.Model == model)]
+        for confidence, alpha in [(0.95, 0.07), (0.80, 0.10)]:
+            lo_q, hi_q = (1-confidence)/2, 1-(1-confidence)/2
+            bounds = sub.groupby("Horizon")["Error_MW"].quantile([lo_q,hi_q]).unstack()
+            lower = pred + bounds[lo_q].reindex(range(1, 8)).to_numpy()
+            upper = pred + bounds[hi_q].reindex(range(1, 8)).to_numpy()
+            ax.fill_between(future_dates, lower, upper, alpha=alpha)
+    ax.set(title=f"{region}: training-only 7-day candidate forecasts with empirical CV bands",
+           ylabel="Daily demand (MW)", xlabel="Date")
+    ax.legend(fontsize=7, ncol=2, loc="best")
+    ax.grid(alpha=.2)
+    fig.autofmt_xdate()
+    fig.tight_layout()
+    fig.savefig(OUT / f"training_forecasts_{region}.png", dpi=140)
+    plt.close(fig)
+
+# ---------------------------------------------------------------------------
+# 17: Model performance / region comparison / exact-horizon plots
+# ---------------------------------------------------------------------------
+for region in regions:
+    s = cv_score.loc[cv_score.Region == region]
+    fig, ax = plt.subplots(figsize=(9, 4.5))
+    for model in FAST_MODELS:
+        part = s.loc[s.Model == model].sort_values("Horizon")
+        ax.plot(part.Horizon, part.MASE, marker="o", label=model)
+    ax.set(title=f"{region}: training CV MASE by forecast horizon",
+           ylabel="Mean absolute scaled error", xlabel="Forecast day (1–7)", xticks=range(1,8))
+    ax.grid(alpha=.25)
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(OUT / f"cv_accuracy_{region}.png",dpi=140)
+    plt.close(fig)
+
+# ---------------------------------------------------------------------------
+# 18: Select and FREEZE by CV only, before scoring the holdout
+# ---------------------------------------------------------------------------
+chosen_rows = (cv_overall.sort_values(["Region", "MASE", "MAE_MW"])
+               .groupby("Region", sort=False).head(1).copy().sort_values("Region"))
+chosen_map = dict(zip(chosen_rows.Region, chosen_rows.Model))
+freeze = {
+    "selected_using": "Training-only full 882-origin CV among FOUR FAST candidates",
+    "excluded_from_full_cv": [x for x in initial_predictor_sets if x not in FAST_MODELS]
+        + ["Log_TSLM_fourier", "BoxCox_TSLM_fourier"],
+    "candidate_set": FAST_MODELS,
+    "selection_metric": "lowest training-CV average MASE over matched Days 1–7",
+    "training_end": train_end.date().isoformat(),
+    "Fourier_K": int(fourier_k),
+    "model_families": "Weekly SeasonalNaive or ordinary least-squares regression with intercept",
+    "transform": "original MW, no log or Box-Cox used in finalists",
+    "holdout_results_used_for_selection": False,
+    "selected_models": {
+        region:{"model":name,"predictors":predictor_sets[name]}
+        for region, name in chosen_map.items()
+    },
+}
+with open(OUT / "frozen_finalist_specifications.json", "w", encoding="utf-8") as f:
+    json.dump(freeze, f, indent=2)
+chosen_rows.to_csv(OUT / "frozen_finalists_cv_only.csv", index=False)
+print("\nFrozen CV-selected models (NO holdout tuning):", chosen_map)
+
+# ---------------------------------------------------------------------------
+# 19: Final holdout: expanding windows, 120 origins, Day 1–7, fixed MASE scale
+# ---------------------------------------------------------------------------
+holdout_records = []
+for region in regions:
+    cache = caches[region]
+    training_idx = int(cache["lookup"].loc[train_end])
+    fixed_denominator = cache["lag_cum"][training_idx] / (training_idx - 6)
+    for origin in holdout_dates:
+        holdout_records.extend(_rows_for_origin(
+            cache, region, chosen_map[region], origin, "Holdout", fixed_denominator))
+holdout_all = pd.DataFrame(holdout_records)
+holdout_counts = holdout_all.groupby(["Region", "Model", "Horizon"])["Origin"].nunique()
+assert (holdout_counts == 120).all() and len(holdout_all) == len(regions)*120*7
+holdout_scores, holdout_valid = _metrics(holdout_all, ["Region", "Model", "Horizon"])
+holdout_scores["Forecast_Origins"] = 120
+holdout_all.to_csv(OUT / "holdout_predictions_120_origins.csv", index=False)
+holdout_scores.to_csv(OUT / "holdout_metrics_by_horizon.csv", index=False)
+print("\nFrozen finalists: holdout accuracy (not used to choose models):")
+display(holdout_scores.round(3))
+
+# ---------------------------------------------------------------------------
+# 20: Holdout actual versus Day-1 prediction and error by horizon
+# ---------------------------------------------------------------------------
+for region in regions:
+    cache = caches[region]
+    region_hold = holdout_valid.loc[holdout_valid.Region == region].copy()
+    h1 = region_hold.loc[region_hold.Horizon == 1]
+    actual = all_daily.loc[(all_daily.unique_id == region) &
+                           (all_daily.ds > train_end)].sort_values("ds")
+    fig, ax = plt.subplots(figsize=(10,4))
+    ax.plot(actual.ds, actual.y, color="#666666", lw=.8, label="Observed holdout demand")
+    ax.scatter(h1.Target_Date, h1.Forecast_MW, s=10, label="Day-1 forecasts (3-day origins)")
+    ax.set(title=f"{region}: frozen {chosen_map[region]} holdout forecasts",
+           xlabel="Date",ylabel="Demand (MW)")
+    ax.grid(alpha=.2);ax.legend(fontsize=8)
+    fig.tight_layout();fig.savefig(OUT/f"holdout_actual_forecast_{region}.png",dpi=140);plt.close(fig)
+    fig, ax = plt.subplots(figsize=(9,4))
+    hscore = holdout_scores.loc[holdout_scores.Region == region].sort_values("Horizon")
+    ax.plot(hscore.Horizon, hscore.MAE_MW, marker="o")
+    ax.set(title=f"{region}: holdout MAE by exact forecast day",
+           xlabel="Forecast day",ylabel="MAE (MW)",xticks=range(1,8))
+    ax.grid(alpha=.2);fig.tight_layout();fig.savefig(OUT/f"holdout_horizon_error_{region}.png",dpi=140);plt.close(fig)
+
+# ---------------------------------------------------------------------------
+# 21: Peak-day analysis on frozen training P95 thresholds
+# ---------------------------------------------------------------------------
+holdout_valid["High_Demand"] = holdout_valid.apply(
+    lambda row: bool(row.Actual_MW >= threshold_map[row.Region]), axis=1)
+peak_scores = []
+for (region, model, horizon_day, is_peak), part in holdout_valid.groupby(
+        ["Region", "Model", "Horizon", "High_Demand"]):
+    err = part["Actual_MW"] - part["Forecast_MW"]
+    peak_scores.append({"Region": region,"Model":model,"Horizon":horizon_day,
+                        "Day_Type":"High demand" if is_peak else "Normal demand",
+                        "Threshold_MW": threshold_map[region],
+                        "Scored_Days":len(part),"ME_MW":err.mean(),
+                        "MAE_MW":err.abs().mean(),"RMSE_MW":np.sqrt((err**2).mean())})
+peak_scores = pd.DataFrame(peak_scores)
+peak_scores.to_csv(OUT / "peak_day_vs_normal_metrics.csv", index=False)
+for region in regions:
+    subset = peak_scores.loc[(peak_scores.Region==region) &
+                             (peak_scores.Day_Type=="High demand")].sort_values("Horizon")
+    fig, ax = plt.subplots(figsize=(9,4))
+    ax.bar(subset.Horizon, subset.ME_MW)
+    ax.axhline(0,color="black",linewidth=.75)
+    ax.set(title=f"{region}: high-demand holdout forecast bias (train P95 threshold)",
+           xlabel="Forecast day",ylabel="ME = actual − forecast (MW)",xticks=range(1,8))
+    ax.grid(alpha=.2,axis="y");fig.tight_layout()
+    fig.savefig(OUT / f"high_demand_bias_{region}.png", dpi=140)
+    plt.close(fig)
+print("\nHigh-demand holdout analysis:")
+display(peak_scores.round(3))
+
+# ---------------------------------------------------------------------------
+# Automated reporting summary / disclosure; no invented metrics
+# ---------------------------------------------------------------------------
+lines = [
+    "# ADS-506: Same-day forecast modeling analysis (Steps 15–21)", "",
+    "## Scope and limitations", "",
+    "The team's original candidate fits and initial diagnostics were retained. ",
+    "Due to the deadline and computation cost, the full 882-origin training ",
+    "cross-validation schedule was completed for four candidates only: ",
+    "SNAIVE, TSLM_trend, TSLM_weekday, and TSLM_fourier. The other initial ",
+    "models were NOT compared on the complete 882-origin schedule. ",
+    "Ordinary least-squares regression was refitted at each origin using ",
+    "prefix sufficient statistics (equivalent to repeated fpppy ",
+    "LinearRegression fits with an intercept). Seasonal naive used lag 7. ",
+    "Calendar predictors and Fourier K were set from pre-holdout data. ",
+    "Both CV and holdout forecasts are scored on the original MW scale. ",
+    "No transformations were applied to the selected finalists. ",
+    "Empirical 80%/95% forecast bands were constructed from training-CV ",
+    "residual quantiles and should not be described as formal parametric intervals.", "",
+    "## Training cross-validation", "",
+    "882 expanding-window origins (three-day step), seven horizons, ",
+    "with forecast accuracy (ME, MAE, RMSE, MAPE, MASE) reported for ",
+    "each model, region and exact forecast day. MASE uses the fold-specific ",
+    "training lag-7 naive MAE. Missing evaluation actuals were not imputed.", "",
+    "## CV-selected finalists (frozen before holdout)", "",
+]
+for region in sorted(chosen_map):
+    choice = chosen_rows.loc[chosen_rows.Region==region].iloc[0]
+    lines.append(f"- {region}: **{chosen_map[region]}** — training-CV MASE {choice.MASE:.3f}; "
+                 f"MAE {choice.MAE_MW:,.1f} MW.")
+lines += ["", "## Final holdout evaluation", "",
+          "The 120 holdout origins run from 2025-09-30 to 2026-09-22, every "
+          "three days. Only full 7-day paths ending by 2026-09-29 are scored. "
+          "Coefficients/states update using observations available through "
+          "the current origin; model choice, predictor sets, and Fourier K "
+          "remain frozen. Holdout MASE uses a single fixed pre-holdout "
+          "training lag-7 naive MAE denominator per region.", ""]
+for region in sorted(chosen_map):
+    s = holdout_scores.loc[holdout_scores.Region==region]
+    lines.append(f"- {region}: selected {chosen_map[region]}; mean across horizon-specific "
+                 f"MAE values {s.MAE_MW.mean():,.1f} MW; "
+                 f"MASE {s.MASE.mean():.3f}.")
+lines += ["", "## High-demand analysis", "",
+          "High-demand days are defined by the 95th percentile computed from "
+          "the training period, with no recomputation using holdout demand. "
+          "ME is actual minus forecast; positive ME indicates underprediction. "
+          "Low high-demand sample sizes by region and horizon require caution.", ""]
+for region in sorted(chosen_map):
+    subset = peak_scores.loc[(peak_scores.Region==region) &
+                             (peak_scores.Day_Type=="High demand")]
+    count = int(subset.Scored_Days.sum())
+    lines.append(f"- {region}: training P95 threshold {threshold_map[region]:,.1f} MW; "
+                 f"{count} scored high-demand origin-target forecasts across horizons.")
+lines += ["", "## Outputs", "",
+          "See this folder for CV/holdout/p95 CSV tables, the frozen model "
+          "JSON specification, and training-only / holdout PNG plots. "
+          "These outputs are suitable for inserting into a technical report "
+          "after reviewing numerical results and limitations.", ""]
+(OUT / "summary_for_report.md").write_text("\n".join(lines), encoding="utf-8")
+print("\nDONE: all fast-path outputs saved in", OUT.resolve())
+print("WARNING: only four model families received full 882-origin CV; other candidates were excluded.")
+```
+
+## Forecast Visualization and Model Performance
+
+The tables above give training CV error for all four candidates by region and day. The plots below show the per-region model comparisons and the finalists' out-of-sample error profiles.
+
+```{python}
+#| label: regional-forecast-visuals
+#| echo: false
+from IPython.display import Image, display
+for region in regions:
+    print(f"{region} — training CV accuracy, holdout forecasts, and high-demand bias")
+    for basename in [f"cv_accuracy_{region}.png",
+                     f"holdout_actual_forecast_{region}.png",
+                     f"holdout_horizon_error_{region}.png",
+                     f"high_demand_bias_{region}.png"]:
+        display(Image(filename=str(OUT / basename)))
+```
+
+## Interpretation, Limitations, and Model Selection
+
+The regression model with trend, weekday effects, and annual Fourier terms had the lowest training CV MASE among the **four fully evaluated candidates** for California, New York, and Texas. These regional model choices were frozen before any 2025–2026 holdout metrics were examined. The final holdout refitted model coefficients at each of the 120 origins using observations available up to that origin only.
+
+Despite the Fourier model's training CV advantage, the selected forecasts underestimated high-demand days. This matters operationally for planning reserve capacity. The initial diagnostic tests also identified residual autocorrelation for several models, motivating richer predictors and dynamic errors. The full ARIMA/ETS and transformed candidate set was **not** evaluated on the 882-origin schedule, so this experiment does not establish superiority over every originally fitted model. Training forecast intervals shown here are empirical CV error quantiles, not calibrated parametric prediction intervals. Missing actual targets are omitted from accuracy calculations; overlapping forecast targets must not be treated as independent daily observations.
