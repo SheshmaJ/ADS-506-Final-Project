@@ -1,0 +1,17 @@
+{
+  "models": [
+    "SNAIVE",
+    "TSLM_trend",
+    "TSLM_weekday",
+    "TSLM_fourier"
+  ],
+  "forecast_origin_by_region": {
+    "CAL": "2026-09-30",
+    "NY": "2026-09-30",
+    "TEX": "2026-09-30"
+  },
+  "selection": "Training CV only; refit on all available past observations",
+  "accuracy": "Training CV pooled across days 1\u20137; holdout exported separately",
+  "intervals": "Empirical signed training-CV errors, separately by region/model/day",
+  "thresholds": "Frozen training-period P95; see training_thresholds.csv"
+}
