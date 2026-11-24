@@ -21,6 +21,14 @@ st.set_page_config(page_title="Regional electricity demand forecast",
 
 # ---------------------------------------------------------------- constants
 DATA_DIR = Path(__file__).resolve().parent / "data"
+st.sidebar.write("Data folder:", str(DATA_DIR))
+st.sidebar.write("Folder exists:", DATA_DIR.exists())
+
+if DATA_DIR.exists():
+    st.sidebar.write(
+        "Files found:",
+        sorted(p.name for p in DATA_DIR.iterdir())
+    )
 TRAIN_END = pd.Timestamp("2025-09-30")
 REGIONS = {"California": "CAL", "Texas": "TEX", "New York": "NY"}
 MODELS = {
