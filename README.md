@@ -1,12 +1,15 @@
-
-
 # ADS-506: Regional Short-Term Electricity Demand Forecasting
 
-**Project Team:** Team 4 
+**Project Team:** Team 4
 
-**Team Members**: Sheshma Jaganathan, Caly Nguyen, Harshali Gaikwad
+**Team Members:** Sheshma Jaganathan, Caly Nguyen, Harshali Gaikwad
 
-**Course:** ADS-506 – Time Series Analysis and Forecasting  
+**Course:** ADS-506 – Time Series Analysis and Forecasting
+
+### 🔗 Project Links
+
+- 📊 **[Interactive Dashboard](https://electricity-demand-forecasting-tx-ca-ny.streamlit.app)** — Explore regional electricity demand, forecasts, and model accuracy.
+- 📁 **[Project Report](https://github.com/SheshmaJ/ADS-506-Final-Project/tree/main/docs)** — View the final report and supporting documents.
 
 ## Project Overview
 
@@ -31,18 +34,18 @@ Electricity demand changes by day of the week and season, making energy planning
 
 | Column | Purpose |
 |---|---|
-| Region | Identify California, Texas or New York |
+| Region | Identify California, Texas, or New York |
 | Local date | Aggregate hourly demand into daily observations |
-| UTC time | Check duplicates, missing hours and daylight saving time |
+| UTC time | Check duplicates, missing hours, and daylight saving time |
 | Demand | Actual demand in MW (the forecasting target) |
 | Time zone | Verify local-time handling per region |
-
 
 ## Tools and Libraries
 
 - Python
 - VS Code
 - Quarto and Jupyter
+- Streamlit and Plotly
 - pandas and NumPy
 - Matplotlib
 - statsmodels
@@ -58,10 +61,11 @@ Electricity demand changes by day of the week and season, making energy planning
 5. **Cross-Validation:** Evaluate forecasting accuracy using rolling-origin cross-validation.
 6. **Holdout Evaluation:** Assess selected models using unseen data.
 7. **Results:** Compare model performance across regions, forecast horizons, and high-demand periods.
+8. **Interactive Dashboard:** Present electricity demand patterns, forecasts, model accuracy, and high-demand risk through Streamlit.
 
 ## Repository Layout
 
-```
+```text
 ADS-506-Final-Project/
 ├── README.md
 ├── requirements.txt
@@ -71,11 +75,15 @@ ADS-506-Final-Project/
 │   └── Region_NY.xlsx
 ├── notebook/                # Python Quarto files
 │   └── ADS506_Final_Project_team4.qmd
+├── dashboard/               # Interactive Streamlit dashboard
+│   ├── app.py
+│   ├── config.toml
+│   ├── requirements.txt
+│   └── data/                # Forecasts and model evaluation results
 ├── docs/                    # Project documentation
 │   ├── Final_Report.pdf
 │   └── Final_Presentation.pptx
 └── .gitignore
-
 ```
 
 ## How to Run the Project
@@ -104,15 +112,57 @@ Open `notebook/ADS506_Final_Project_team4.qmd` in VS Code.
 
 Confirm the data paths, select the Python kernel, and run the code cells in order. The report can also be rendered using Quarto.
 
+## 📊 Interactive Streamlit Dashboard
+
+The Streamlit dashboard provides an interactive way to explore electricity demand and forecasting results for California, Texas, and New York.
+
+**Dashboard features:**
+
+- **Demand History:** Explore daily electricity demand and seasonal patterns.
+- **Forecast Comparison:** View short-term forecasts for Days 1–7 with 80% and 95% prediction intervals.
+- **Model Accuracy:** Compare forecasting models using MAE and RMSE.
+- **High-Demand Risk:** Identify forecast periods that may exceed the historical high-demand threshold.
+- **Interactive Settings:** Select regions, forecasting models, and forecast horizons.
+- **Download Results:** Export forecast tables as CSV files.
+
+### ▶️ How to Run the Dashboard
+
+**1. Open the project folder**
+
+```bash
+cd ADS-506-Final-Project
+```
+
+**2. Install dashboard dependencies**
+
+```bash
+python -m pip install -r dashboard/requirements.txt
+```
+
+**3. Launch the Streamlit dashboard**
+
+```bash
+python -m streamlit run dashboard/app.py
+```
+
+**4. Open the dashboard**
+
+Streamlit will display a local URL, usually:
+
+http://localhost:8501
+
+Open this URL in your browser to explore the dashboard.
+
+
 ## Team Contribution Summary
 
-**Sheshma Jaganathan**: Data preparation, preprocessing, initial exploratory data analysis, and evaluation setup.
+**Sheshma Jaganathan:** Data preparation, preprocessing, initial exploratory data analysis, evaluation setup, and dashboard development.
 
-**Caly Nguyen**: Time series decomposition, feature engineering, additional exploratory analysis, transformations, and diagnostics.
+**Caly Nguyen:** Time series decomposition, feature engineering, additional exploratory analysis, transformations, and diagnostics.
 
-**Harshali Gaikwad**: Forecasting model development, cross-validation, model comparison, holdout evaluation, and final results.
+**Harshali Gaikwad:** Forecasting model development, cross-validation, model comparison, holdout evaluation, and final results.
 
-Note: All team members will work collaboratively on the final project report and presentation, including reviewing results, making improvements, and preparing the final deliverables.
+**Team Collaboration:** All team members work collaboratively on the final project report and presentation, including reviewing results, making improvements, and preparing the final deliverables.
 
 ## Reference
 
