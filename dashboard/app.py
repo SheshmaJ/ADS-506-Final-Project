@@ -20,7 +20,7 @@ st.set_page_config(page_title="Regional electricity demand forecast",
                    page_icon="⚡", layout="wide")
 
 # ---------------------------------------------------------------- constants
-DATA_DIR = Path("data")
+DATA_DIR = Path(__file__).resolve().parent / "data"
 TRAIN_END = pd.Timestamp("2025-09-30")
 REGIONS = {"California": "CAL", "Texas": "TEX", "New York": "NY"}
 MODELS = {
