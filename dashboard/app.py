@@ -327,7 +327,12 @@ code = REGIONS[region]
 model_label = chosen[0]
 recent, fc, p95, is_demo = get_view(code, MODELS[model_label], horizon)
 acc = get_accuracy(code)
+st.sidebar.write("Accuracy file exists:", (DATA_DIR / "accuracy.csv").exists())
+st.sidebar.write("Selected region:", code)
+st.sidebar.write("Accuracy rows:", 0 if acc is None else len(acc))
 
+if acc is not None:
+    st.sidebar.write("Models found:", acc["model"].tolist())
 # ---------------------------------------------------------------------- main
 st.markdown('<h1 class="main-title">Regional electricity demand forecast</h1>',
             unsafe_allow_html=True)
