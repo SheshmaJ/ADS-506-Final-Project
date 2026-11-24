@@ -50,7 +50,33 @@ st.markdown("""
 .side-h{font-size:16px;font-weight:700;margin:10px 0 0}
 .main-title{font-size:38px;font-weight:700;line-height:1.1;margin:0;padding:0}
 .sub{font-size:18px;color:#3A4254;margin:0 0 2px}
-.kpi{border:1px solid #C9D3E3;border-radius:10px;padding:10px 16px;background:#fff;height:100%}
+/* Compact KPI boxes */
+.kpi {
+    border: 1px solid #C9D3E3;
+    border-radius: 10px;
+    padding: 5px 12px;
+    background: #fff;
+    height: auto;
+    min-height: 0;
+}
+
+.kpi .t {
+    font-size: 14px;
+    font-weight: 700;
+    line-height: 1.2;
+}
+
+.kpi .v {
+    font-size: 28px;
+    font-weight: 700;
+    line-height: 1.1;
+    margin: 2px 0;
+}
+
+.kpi .n {
+    font-size: 12px;
+    line-height: 1.2;
+}
 .kpi .t{font-size:16px;font-weight:700}
 .kpi .v{font-size:34px;font-weight:700;line-height:1.1}
 .kpi .n{font-size:14px;color:#3A4254}
@@ -78,12 +104,28 @@ div.stButton>button[kind="primary"]:hover{background:#B81D23;color:#fff}
 .stTabs [data-baseweb="tab-highlight"],.stTabs [data-baseweb="tab-border"]{display:none}
 [data-testid="stVerticalBlockBorderWrapper"]{border-color:#C9D3E3;border-radius:10px}
 [data-testid="stHeader"]{display:none}
-.block-container{padding-top:.8rem!important;padding-bottom:.4rem!important;max-width:100%}
+[data-testid="stMainBlockContainer"] {
+    padding-top: 0rem !important;
+    padding-bottom: 0.4rem !important;
+    max-width: 100% !important;
+}
 .block-container [data-testid="stVerticalBlock"]{gap:.45rem}
 [data-testid="stSidebarHeader"]{display:none}
 [data-testid="stSidebarUserContent"]{padding-top:.8rem}
-[data-testid="stSidebar"] [data-testid="stVerticalBlock"]{gap:.2rem}
+[data-testid="stSidebar"] [data-testid="stVerticalBlock"]{gap:0.65rem}
 [data-testid="stVerticalBlockBorderWrapper"]{padding:.4rem .8rem!important}
+/* push main heading up */
+[data-testid="stMainBlockContainer"],
+[data-testid="stAppViewBlockContainer"]{padding-top:0!important}
+.main-title{margin-top:-1rem!important;line-height:1.15}
+
+/* stop subtitle text from touching the boxes below */
+.sub{line-height:1.5;margin:0 0 .6rem!important;padding-bottom:2px}
+.panel-h{line-height:1.3}
+.panel-s{line-height:1.5;margin:0 0 .6rem!important}
+
+/* a little more breathing room between rows */
+.block-container [data-testid="stVerticalBlock"]{gap:.7rem}
 </style>
 """, unsafe_allow_html=True)
 
@@ -207,7 +249,7 @@ def forecast_chart(recent, fc, p95, show80, show95, show_p95):
                   annotation_position="bottom left")
     shown = [-21, -14, -7, 0, 3, 7]
     fig.update_layout(
-        height=340, margin=dict(l=70, r=20, t=38, b=30), plot_bgcolor="white",
+        height=280, margin=dict(l=70, r=20, t=38, b=30), plot_bgcolor="white",
         font=dict(family="Source Serif 4, Georgia, serif", size=15, color="#1B1F2A"),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, font=dict(size=13)),
         xaxis=dict(tickvals=shown, ticktext=["−21d", "−14d", "−7d", "Today", "+3d", "+7d"],
