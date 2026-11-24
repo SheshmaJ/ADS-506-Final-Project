@@ -133,7 +133,6 @@ div.stButton>button[kind="primary"]:hover{background:#B81D23;color:#fff}
 # ---------------------------------------------------------------------- data
 @st.cache_data(ttl=60)
 def load_csv(name: str):
-def load_csv(name: str):
     path = DATA_DIR / name
     if not path.exists():
         return None
