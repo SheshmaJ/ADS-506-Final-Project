@@ -21,17 +21,6 @@ st.set_page_config(page_title="Regional electricity demand forecast",
 
 # ---------------------------------------------------------------- constants
 DATA_DIR = Path(__file__).resolve().parent / "data"
-st.sidebar.write("Branch deployment file check")
-st.sidebar.write("App path:", str(Path(__file__).resolve()))
-st.sidebar.write("Data folder exists:", DATA_DIR.exists())
-
-if DATA_DIR.exists():
-    st.sidebar.write(
-        "Files available:",
-        sorted(p.name for p in DATA_DIR.iterdir())
-    )
-else:
-    st.sidebar.error("Dashboard data folder is missing")
 TRAIN_END = pd.Timestamp("2025-09-30")
 REGIONS = {"California": "CAL", "Texas": "TEX", "New York": "NY"}
 MODELS = {
@@ -203,45 +192,10 @@ def get_view(code: str, model: str, horizon: int):
 
 def get_accuracy(code: str):
     acc = load_csv("accuracy.csv")
-
     if acc is None:
-        st.error(f"Accuracy file not found: {DATA_DIR / 'accuracy.csv'}")
         return None
-
-    acc.columns = acc.columns.str.strip()
-
-    required = {"unique_id", "model", "MAE", "RMSE"}
-    if not required.issubset(acc.columns):
-        st.error(f"Accuracy CSV columns: {acc.columns.tolist()}")
-        return None
-
-    acc["unique_id"] = acc["unique_id"].astype(str).str.strip().str.upper()
-    acc["model"] = acc["model"].astype(str).str.strip()
-
-    model_mapping = {
-        "SNAIVE": "SNAIVE",
-        "Weekly seasonal naive": "SNAIVE",
-        "TSLM_trend": "TSLM_trend",
-        "TSLM_weekday": "TSLM_weekday",
-        "TSLM_fourier": "TSLM_fourier",
-    }
-
-    acc["model"] = acc["model"].replace(model_mapping)
-
-    for col in ["MAE", "RMSE"]:
-        acc[col] = pd.to_numeric(
-            acc[col].astype(str).str.replace(",", "", regex=False),
-            errors="coerce"
-        )
-
-    sub = acc[acc["unique_id"] == code].copy()
-
-    if sub.empty:
-        st.warning(f"No accuracy results for {code}")
-        st.write("Available regions:", acc["unique_id"].unique().tolist())
-        return None
-
-    return sub
+    sub = acc[acc["unique_id"] == code]
+    return sub if len(sub) else None
 
 
 # ------------------------------------------------------------------- helpers
@@ -373,12 +327,7 @@ code = REGIONS[region]
 model_label = chosen[0]
 recent, fc, p95, is_demo = get_view(code, MODELS[model_label], horizon)
 acc = get_accuracy(code)
-st.sidebar.write("Accuracy file exists:", (DATA_DIR / "accuracy.csv").exists())
-st.sidebar.write("Selected region:", code)
-st.sidebar.write("Accuracy rows:", 0 if acc is None else len(acc))
 
-if acc is not None:
-    st.sidebar.write("Models found:", acc["model"].tolist())
 # ---------------------------------------------------------------------- main
 st.markdown('<h1 class="main-title">Regional electricity demand forecast</h1>',
             unsafe_allow_html=True)
