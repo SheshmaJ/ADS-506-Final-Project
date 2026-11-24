@@ -21,6 +21,17 @@ st.set_page_config(page_title="Regional electricity demand forecast",
 
 # ---------------------------------------------------------------- constants
 DATA_DIR = Path(__file__).resolve().parent / "data"
+st.sidebar.write("Branch deployment file check")
+st.sidebar.write("App path:", str(Path(__file__).resolve()))
+st.sidebar.write("Data folder exists:", DATA_DIR.exists())
+
+if DATA_DIR.exists():
+    st.sidebar.write(
+        "Files available:",
+        sorted(p.name for p in DATA_DIR.iterdir())
+    )
+else:
+    st.sidebar.error("Dashboard data folder is missing")
 TRAIN_END = pd.Timestamp("2025-09-30")
 REGIONS = {"California": "CAL", "Texas": "TEX", "New York": "NY"}
 MODELS = {
